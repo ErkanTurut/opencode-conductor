@@ -26,7 +26,6 @@ permission:
     'chmod*': deny
     'chown*': deny
   task:
-    '*': deny
     scout: allow
     external-scout: allow
     architect: allow

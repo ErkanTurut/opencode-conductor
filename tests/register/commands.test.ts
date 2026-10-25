@@ -429,15 +429,16 @@ describe('conductor:doctor', () => {
 })
 
 // ---------------------------------------------------------------------------
-// Plugin wiring: skills/commands/tools are individually non-fatal
+// Plugin wiring: the tool set is registered without the runtime transform paths
 // ---------------------------------------------------------------------------
 
 describe('setupConductor wiring', () => {
-  it('keeps commands and tools when the skill registration fails', async () => {
+  it('registers the tools without the agent/skill/command transforms', async () => {
     const projectRoot = tempDir('conductor-wiring-project-')
     const home = tempDir('conductor-wiring-home-')
     const registeredCommands: CommandDefinition[] = []
     const registeredTools: string[] = []
+    const transformCalls: string[] = []
     const logged: string[] = []
 
     const ctx = {
@@ -447,16 +448,19 @@ describe('setupConductor wiring', () => {
       },
       agent: {
         transform() {
-          throw new Error('runtime refused the agent transform')
+          transformCalls.push('agent')
+          throw new Error('the runtime refused the agent transform')
         },
       },
       skill: {
         transform() {
-          throw new Error('runtime refused the skill transform')
+          transformCalls.push('skill')
+          throw new Error('the runtime refused the skill transform')
         },
       },
       command: {
         async transform(callback: (editor: { add(entry: CommandDefinition): void }) => void) {
+          transformCalls.push('command')
           callback({
             add(entry) {
               registeredCommands.push(entry)
@@ -488,12 +492,19 @@ describe('setupConductor wiring', () => {
       console.error = originalError
     }
 
-    // A skills failure did not cost the commands...
-    expect(registeredCommands.map((entry) => entry.name)).toEqual([...COMMAND_NAMES])
-    // ...nor the tool set.
+    // Files are the registration path: no transform runs for any of the three
+    // locations, and commands are omitted until the schema shape is confirmed.
+    expect(transformCalls).toEqual([])
+    expect(registeredCommands).toEqual([])
+    // The roster and the skills landed as files instead.
+    expect(existsSync(join(home, '.config', 'opencode', 'agents', 'conductor.md'))).toBe(true)
+    expect(existsSync(join(home, '.config', 'opencode', 'skills', 'closeout', 'SKILL.md'))).toBe(
+      true,
+    )
+    // The tool set is unaffected.
     expect(registeredTools.length).toBeGreaterThan(10)
     expect(registeredTools).toContain('supervisor_init_run')
-    expect(logged.some((line) => line.includes('[conductor] skills:'))).toBe(true)
-    expect(logged.some((line) => line.includes('runtime refused the skill transform'))).toBe(true)
+    // And no transform failure was logged: nothing tried the transform path.
+    expect(logged.some((line) => line.includes('transform'))).toBe(false)
   })
 })

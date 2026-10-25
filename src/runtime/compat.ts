@@ -227,8 +227,8 @@ export function selectAgentRegistrationPath(
 /**
  * One permission rule in the runtime's `action`/`resource`/`effect` shape.
  *
- * The runtime names two actions differently from the file format (`shell` for
- * `bash`, `subagent` for `task`); `renderAgentMarkdown` maps them back.
+ * The file format uses the same action names (`shell`, `subagent`, `read`,
+ * `edit`, ...); `renderAgentMarkdown` only corrects the two legacy aliases.
  */
 export interface MaterializablePermissionRule {
   action: string
@@ -246,10 +246,15 @@ export interface MaterializableAgent {
   permissions?: MaterializablePermissionRule[]
 }
 
-/** Runtime action name → the file-format action name. */
-const FILE_PERMISSION_ACTION_ALIASES: Readonly<Record<string, string>> = {
-  shell: 'bash',
-  subagent: 'task',
+/**
+ * Legacy file-format action name → the V2 name the runtime uses.
+ *
+ * The shipped assets already speak V2 (`shell`, `subagent`); the map only
+ * catches a caller that still hands over the old aliases.
+ */
+const V2_PERMISSION_ACTION_ALIASES: Readonly<Record<string, string>> = {
+  bash: 'shell',
+  task: 'subagent',
 }
 
 function yamlScalar(value: string): string {
@@ -259,19 +264,6 @@ function yamlScalar(value: string): string {
 /** Single-quoted YAML scalar (patterns): escape an embedded quote by doubling. */
 function yamlQuoted(value: string): string {
   return `'${value.replace(/'/g, "''")}'`
-}
-
-/**
- * A permission pattern, single-quoted (the file-agent convention).
- *
- * A pattern that itself contains a single quote switches to a double-quoted
- * scalar: OpenCode's own loader needs the YAML escape, while the markdown
- * reader in `register/agents.ts` does not unescape a doubled `''`, so the
- * double-quoted form is the one shape that is valid YAML *and* round-trips
- * here.
- */
-function yamlPattern(value: string): string {
-  return value.includes("'") ? yamlScalar(value) : yamlQuoted(value)
 }
 
 /** A bare map key when it is a plain identifier, a quoted one otherwise. */
@@ -285,23 +277,37 @@ function yamlEffect(value: string): string {
 }
 
 /**
- * Render the `permission` block in the file-agent format the shipped agents
- * already use:
+ * Emission rank of an effect.
+ *
+ * V2 evaluates the *last* matching rule, so a narrow deny must be written after
+ * the broad allow it narrows — the opposite of the V1 first-match block the
+ * shipped assets still use. An unknown effect sits between `ask` and `deny` so
+ * it can never outrank an explicit denial.
+ */
+const RENDER_EFFECT_RANK: Readonly<Record<string, number>> = {
+  allow: 0,
+  ask: 1,
+  deny: 2,
+}
+
+function effectRank(effect: string): number {
+  return RENDER_EFFECT_RANK[effect] ?? 1.5
+}
+
+/**
+ * Render the V2 `permissions` block:
  *
  * ```
- * permission:
- *   read:
- *     '*': allow
- *     '.env*': deny
- *   bash:
- *     'git push*': deny
+ * permissions:
+ *   - action: read
+ *     resource: '.env*'
+ *     effect: deny
  * ```
  *
- * Grouping by action (first appearance wins) keeps one action's rules together,
- * and rule order inside an action is preserved: the runtime evaluates the first
- * match, so an existing deny must stay ahead of the broad allow it narrows.
- * Omitting the block entirely would fall back to the runtime default `allow *`,
- * which is the security gap this function closes.
+ * Rules stay grouped by action (first appearance wins) and each action is
+ * ordered allow → ask → deny, preserving the caller's relative order inside an
+ * effect group. Omitting the block entirely would fall back to the runtime
+ * default `allow *`, which is the security gap this function closes.
  */
 function renderPermissionBlock(
   rules: readonly MaterializablePermissionRule[] | undefined,
@@ -309,35 +315,49 @@ function renderPermissionBlock(
   if (!rules || rules.length === 0) return []
 
   const order: string[] = []
-  const groups = new Map<string, MaterializablePermissionRule[]>()
-  for (const rule of rules) {
-    if (!rule || typeof rule.action !== 'string' || rule.action.length === 0) continue
-    const action = FILE_PERMISSION_ACTION_ALIASES[rule.action] ?? rule.action
+  const groups = new Map<string, Array<{ rule: MaterializablePermissionRule; index: number }>>()
+  rules.forEach((rule, index) => {
+    if (!rule || typeof rule.action !== 'string' || rule.action.length === 0) return
+    const action = V2_PERMISSION_ACTION_ALIASES[rule.action] ?? rule.action
     let group = groups.get(action)
     if (!group) {
       group = []
       groups.set(action, group)
       order.push(action)
     }
-    group.push(rule)
-  }
+    group.push({ rule, index })
+  })
   if (order.length === 0) return []
 
-  const lines: string[] = ['permission:']
+  const lines: string[] = ['permissions:']
   for (const action of order) {
-    lines.push(`  ${yamlKey(action)}:`)
-    for (const rule of groups.get(action) ?? []) {
+    // `sort` is stable, so the index tie-break is only belt-and-braces.
+    const group = [...(groups.get(action) ?? [])].sort(
+      (left, right) =>
+        effectRank(left.rule.effect) - effectRank(right.rule.effect) ||
+        left.index - right.index,
+    )
+    for (const { rule } of group) {
       const resource =
         typeof rule.resource === 'string' && rule.resource.length > 0
           ? rule.resource
           : '*'
-      lines.push(`    ${yamlPattern(resource)}: ${yamlEffect(rule.effect)}`)
+      lines.push(`  - action: ${yamlKey(action)}`)
+      lines.push(`    resource: ${yamlQuoted(resource)}`)
+      lines.push(`    effect: ${yamlEffect(rule.effect)}`)
     }
   }
   return lines
 }
 
-/** Render one agent as OpenCode's file-based agent format (frontmatter + body). */
+/**
+ * Render one agent as OpenCode's file-based agent format (frontmatter + body).
+ *
+ * The frontmatter is V2: the runtime only discovers a global agent under
+ * `<config>/opencode/agents/*.md` when it carries this shape, and a V1
+ * `permission:` map is silently ignored outside a project. `model` keeps the
+ * `provider/id` reference with an optional `#variant` suffix.
+ */
 export function renderAgentMarkdown(agent: MaterializableAgent): string {
   const lines: string[] = ['---']
   if (agent.description) lines.push(`description: ${yamlScalar(agent.description)}`)
@@ -389,5 +409,127 @@ export function materializeAgentFiles(
     fs.renameSync(temp, target)
     written.push(target)
   }
+  return written
+}
+
+/** The directory entry subset the skill mirror walks (a `Dirent` in practice). */
+export interface MaterializeDirEntry {
+  name: string
+  isDirectory(): boolean
+  isFile(): boolean
+}
+
+/**
+ * `MaterializeFs` plus directory listing.
+ *
+ * The agent materialiser writes a flat list of known files; mirroring the
+ * package's skill tree needs to read the source layout, so it gets its own
+ * interface rather than widening the one every existing adapter implements.
+ */
+export interface MaterializeTreeFs extends MaterializeFs {
+  readdirSync(
+    path: string,
+    options: { withFileTypes: true },
+  ): readonly MaterializeDirEntry[]
+}
+
+/** The file every skill directory must contain to be mirrored. */
+export const SKILL_MANIFEST_NAME = 'SKILL.md'
+
+function joinPath(base: string, name: string): string {
+  return base.endsWith('/') ? `${base}${name}` : `${base}/${name}`
+}
+
+/**
+ * Make a caller-supplied directory absolute.
+ *
+ * This module deliberately imports no `node:path` (it must load where the probe
+ * runs), so the one normalisation the mirror needs is inlined. Callers pass an
+ * absolute config path in production.
+ */
+function absoluteDir(dir: string): string {
+  const withoutTrailing = dir.replace(/\/+$/, '') || '/'
+  if (withoutTrailing.startsWith('/')) return withoutTrailing
+  const cwd = process.cwd().replace(/\/+$/, '')
+  return `${cwd}/${withoutTrailing}`
+}
+
+/** Sorted directory listing; an unreadable directory is empty, never a throw. */
+function listDir(fs: MaterializeTreeFs, dir: string): MaterializeDirEntry[] {
+  try {
+    return [...fs.readdirSync(dir, { withFileTypes: true })].sort((left, right) =>
+      left.name < right.name ? -1 : left.name > right.name ? 1 : 0,
+    )
+  } catch {
+    return []
+  }
+}
+
+/** Recursively mirror one source directory, writing only changed files. */
+function mirrorSkillDir(
+  sourceDir: string,
+  targetDir: string,
+  fs: MaterializeTreeFs,
+  written: string[],
+): void {
+  fs.mkdirSync(targetDir, { recursive: true, mode: 0o700 })
+  for (const entry of listDir(fs, sourceDir)) {
+    const source = joinPath(sourceDir, entry.name)
+    const target = joinPath(targetDir, entry.name)
+
+    if (entry.isDirectory()) {
+      mirrorSkillDir(source, target, fs, written)
+      continue
+    }
+    // Only regular files are mirrored: a symlink or socket is not package
+    // content, and following a link would copy a host file into the config dir.
+    if (!entry.isFile()) continue
+
+    let content: string
+    try {
+      content = fs.readFileSync(source, 'utf8')
+    } catch {
+      continue
+    }
+    try {
+      if (fs.existsSync(target) && fs.readFileSync(target, 'utf8') === content) continue
+    } catch {
+      // An unreadable existing file is replaced rather than trusted.
+    }
+    const temp = `${target}.tmp-${process.pid}`
+    fs.writeFileSync(temp, content, { mode: 0o600 })
+    fs.renameSync(temp, target)
+    written.push(target)
+  }
+}
+
+/**
+ * Mirror the package's skill tree into the runtime's global skills directory.
+ *
+ * The runtime discovers a global skill under `<config>/opencode/skills/<name>/`
+ * containing `SKILL.md`; registering through `skill.transform` instead
+ * destabilises the watched config directory on OpenCode 2.1.3, so files are the
+ * registration path. Every immediate subdirectory with a `SKILL.md` is copied
+ * recursively (a skill's `references/` siblings must travel with it).
+ *
+ * Idempotent: an unchanged file is left untouched. Atomic per file (temp +
+ * rename), directories 0700 and files 0600. Returns the absolute paths written
+ * — empty on a no-op second run.
+ */
+export function materializeSkillDirs(
+  assetsSkillsDir: string,
+  targetDir: string,
+  fs: MaterializeTreeFs,
+): string[] {
+  const written: string[] = []
+  const root = absoluteDir(targetDir)
+
+  for (const entry of listDir(fs, assetsSkillsDir)) {
+    if (!entry.isDirectory() || entry.name.startsWith('.')) continue
+    const source = joinPath(assetsSkillsDir, entry.name)
+    if (!fs.existsSync(joinPath(source, SKILL_MANIFEST_NAME))) continue
+    mirrorSkillDir(source, joinPath(root, entry.name), fs, written)
+  }
+
   return written
 }

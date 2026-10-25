@@ -387,13 +387,43 @@ const fleet = loadFleetConfig(ASSETS_DIR)
 const roster = loadAgentDefinitions(ASSETS_DIR, fleet)
 
 describe('registerAgents', () => {
-  it('registers the roster through transform and defaults conductor', async () => {
+  it('materialises the roster as files and never touches the runtime transform by default', async () => {
+    const stub = stubContext()
+    const dir = tempDir()
+    const result = await registerAgents(stub.ctx, roster, {
+      configDir: dir,
+      env: {},
+      fs: io,
+      fleet,
+    })
+
+    // Files are the registration path: every id is available, and "registered"
+    // reports that roster even though no transform ran.
+    expect(result.registered).toHaveLength(15)
+    expect(new Set(result.registered).size).toBe(15)
+    expect(result.registered).toEqual(roster.map((definition) => definition.id))
+    expect(result.materialized).toHaveLength(15)
+    expect(result.defaultAgent).toBe('conductor')
+    expect(result.warnings).toEqual([])
+
+    for (const definition of roster) {
+      expect(nodeFs.existsSync(join(dir, 'agents', `${definition.id}.md`))).toBe(true)
+    }
+
+    // No transform, and in particular no `editor.default`: the default agent
+    // comes from the user's config, not from a runtime call.
+    expect(stub.ids).toEqual([])
+    expect(stub.defaultId).toBe('')
+  })
+
+  it('registers through transform when asked, and defaults conductor', async () => {
     const stub = stubContext()
     const result = await registerAgents(stub.ctx, roster, {
       configDir: tempDir(),
       env: {},
       fs: io,
       fleet,
+      transform: true,
     })
 
     expect(result.registered).toHaveLength(15)
@@ -429,6 +459,7 @@ describe('registerAgents', () => {
       fleet,
     })
     expect(first.materialized).toHaveLength(15)
+    expect(first.registered).toHaveLength(15)
     for (const definition of roster) {
       expect(nodeFs.existsSync(join(dir, 'agents', `${definition.id}.md`))).toBe(true)
     }
@@ -436,8 +467,12 @@ describe('registerAgents', () => {
     const conductorFile = nodeFs.readFileSync(join(dir, 'agents', 'conductor.md'), 'utf8')
     expect(conductorFile).toContain('mode: primary')
     expect(conductorFile).toContain('Coordinates bounded software runs')
+    // V2 frontmatter is what the runtime discovers globally.
+    expect(conductorFile).toContain('permissions:\n')
+    expect(conductorFile).not.toContain('\npermission:\n')
 
-    // Idempotent: the files are byte-identical, so nothing is rewritten.
+    // Idempotent: the files are byte-identical, so nothing is rewritten — and
+    // the roster still reads as registered.
     const second = await registerAgents(stub.ctx, roster, {
       configDir: dir,
       env: {},
@@ -445,6 +480,7 @@ describe('registerAgents', () => {
       fleet,
     })
     expect(second.materialized).toEqual([])
+    expect(second.registered).toHaveLength(15)
   })
 
   it('honours CONDUCTOR_NO_MATERIALIZE=1', async () => {
@@ -456,7 +492,8 @@ describe('registerAgents', () => {
       fleet,
     })
 
-    expect(result.registered).toHaveLength(15)
+    // Nothing is registered by any path: no transform, and the write is off.
+    expect(result.registered).toEqual([])
     expect(result.materialized).toEqual([])
   })
 
@@ -475,6 +512,7 @@ describe('registerAgents', () => {
       env: {},
       fs: io,
       fleet,
+      transform: true,
     })
 
     expect(result.warnings).toHaveLength(1)
@@ -487,7 +525,7 @@ describe('registerAgents', () => {
   })
 
   it('keeps a known provider whose model is not in the fleet', async () => {
-    const stub = stubContext()
+    const dir = tempDir()
     const stray: AgentDefinition = {
       id: 'known-provider',
       description: 'known',
@@ -496,26 +534,42 @@ describe('registerAgents', () => {
       model: { providerID: 'opencode-go', id: 'unlisted-model' },
     }
 
-    const result = await registerAgents(stub.ctx, [stray], {
-      configDir: tempDir(),
+    const result = await registerAgents(null, [stray], {
+      configDir: dir,
       env: {},
       fs: io,
       fleet,
     })
 
     expect(result.warnings).toEqual([])
-    expect(stub.agents['known-provider'].model).toEqual({
-      providerID: 'opencode-go',
-      id: 'unlisted-model',
-    })
+    expect(result.registered).toEqual(['known-provider'])
+    const written = nodeFs.readFileSync(
+      join(dir, 'agents', 'known-provider.md'),
+      'utf8',
+    )
+    expect(written).toContain('model: "opencode-go/unlisted-model"')
   })
 
-  it('never throws when the runtime has no agent.transform', async () => {
+  it('needs no agent.transform on the default path', async () => {
     const result = await registerAgents(null, roster, {
       configDir: tempDir(),
       env: {},
       fs: io,
       fleet,
+    })
+
+    expect(result.registered).toHaveLength(15)
+    expect(result.materialized).toHaveLength(15)
+    expect(result.warnings).toEqual([])
+  })
+
+  it('reports a missing transform when transform registration is requested', async () => {
+    const result = await registerAgents(null, roster, {
+      configDir: tempDir(),
+      env: {},
+      fs: io,
+      fleet,
+      transform: true,
     })
 
     expect(result.registered).toEqual([])
@@ -538,6 +592,7 @@ describe('registerAgents', () => {
       env: {},
       fs: io,
       fleet,
+      transform: true,
     })
 
     expect(result.registered).toEqual([])
@@ -569,6 +624,7 @@ describe('registerAgents', () => {
       env: {},
       fs: io,
       fleet,
+      transform: true,
     })
 
     expect(result.registered).toHaveLength(14)

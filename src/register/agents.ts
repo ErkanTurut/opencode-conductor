@@ -5,15 +5,16 @@
 //   1. A plugin *can* create an agent by calling `editor.update(id, mutate)`
 //      with an id that does not exist yet. That is observed behaviour of the
 //      runtime, not a documented API (see `runtime/compat.ts`'s probe and
-//      `tests/probes/agent-transform-probe.ts`), so it is used but never
-//      trusted alone.
-//   2. A file in the user's global `opencode/agents/` directory is the
-//      documented, restart-proof way to define an agent. It costs one write per
-//      (unchanged) agent, so it is cheap insurance.
+//      `tests/probes/agent-transform-probe.ts`). On OpenCode 2.1.3 it is not
+//      used by default: the transform reshapes config reads (commands fail
+//      `Command.list` schema validation) and keeps re-writing the watched
+//      config directory. It stays available behind `transform: true` for
+//      tests and experiments.
+//   2. A V2 agent file in the user's global `opencode/agents/` directory is
+//      the documented, restart-proof way to define an agent. Files are the
+//      registration path, and `materializeAgentFiles` skips unchanged files so
+//      a run costs no writes.
 //
-// Therefore `registerAgents` does both, every time, and treats neither as
-// authoritative: the transform path makes the roster available in the running
-// session, the file path makes it available after an API drift or a restart.
 // Nothing here throws — a failure is a warning, because an agent roster is an
 // enhancement and must never take the supervisor's tools down with it.
 //
@@ -25,7 +26,11 @@
 // baseline rejects `.ts`-suffixed specifiers (TS5097).
 import * as nodeFs from 'node:fs'
 import { join } from 'node:path'
-import { materializeAgentFiles, type MaterializeFs } from '../runtime/compat'
+import {
+  materializeAgentFiles,
+  type MaterializeFs,
+  type MaterializeTreeFs,
+} from '../runtime/compat'
 
 /** The agent that becomes the session default when it is in the roster. */
 export const DEFAULT_AGENT_ID = 'conductor'
@@ -122,6 +127,14 @@ export interface RegisterAgentsOptions {
   configDir?: string | null
   /** The fleet whose models/fallback decide the unknown-model policy. */
   fleet?: FleetConfig | null
+  /**
+   * Register through `ctx.agent.transform` as well. Off by default: on
+   * OpenCode 2.1.3 the transform destabilises the config location (commands
+   * fail `Command.list` schema validation, and writes into the watched config
+   * directory cause reload storms), so files are the registration path. The
+   * code is kept for tests and experiments.
+   */
+  transform?: boolean
   /** Disable file materialization (the env switch also disables it). */
   materialize?: boolean
   /** Filesystem adapter for materialization (defaults to `node:fs`). */
@@ -497,7 +510,11 @@ export function loadAgentDefinitions(
 // Registration
 // ---------------------------------------------------------------------------
 
-const defaultFs: MaterializeFs = {
+/**
+ * The real filesystem adapter, also shared with the skill mirror in
+ * `src/index.ts` (which needs the directory listing `MaterializeTreeFs` adds).
+ */
+export const nodeMaterializeFs: MaterializeTreeFs = {
   mkdirSync: (path, options) =>
     nodeFs.mkdirSync(path, options as nodeFs.MakeDirectoryOptions),
   writeFileSync: (path, data, options) =>
@@ -506,6 +523,10 @@ const defaultFs: MaterializeFs = {
   readFileSync: (path, encoding) =>
     nodeFs.readFileSync(path, { encoding: encoding as BufferEncoding }),
   existsSync: (path) => nodeFs.existsSync(path),
+  readdirSync: (path, options) =>
+    nodeFs.readdirSync(path, options) as unknown as ReturnType<
+      MaterializeTreeFs['readdirSync']
+    >,
 }
 
 /** The config directory agent files live under, or `null` when HOME is unknown. */
@@ -612,11 +633,16 @@ function applyDefinition(agent: MutableAgentConfig, definition: AgentDefinition)
 }
 
 /**
- * Register the roster, then materialise the same roster as files.
+ * Register the roster.
+ *
+ * Files are the registration path: by default the roster is materialised as V2
+ * markdown and no runtime transform runs. `transform: true` additionally
+ * registers through `ctx.agent.transform` (kept for tests/experiments; it
+ * destabilises the config location on OpenCode 2.1.3).
  *
  * Never throws. Every failure is a `warnings` entry and the remaining work
  * continues: one agent the runtime refuses must not cost the other fourteen,
- * and a failed transform must not cost the file fallback.
+ * and a failed transform must not cost the file path.
  */
 export async function registerAgents(
   ctx: AgentRegistrationContext | null | undefined,
@@ -634,42 +660,46 @@ export async function registerAgents(
     ? DEFAULT_AGENT_ID
     : (resolved[0]?.id ?? DEFAULT_AGENT_ID)
 
-  // (1) Runtime registration. The transform callback is synchronous; the
-  // returned promise (when the runtime returns one) is awaited.
-  try {
-    const agent = ctx?.agent
-    const transform = agent?.transform
-    if (typeof transform !== 'function') {
-      throw new Error('the runtime exposes no agent.transform')
-    }
+  // (1) Optional runtime registration. Off by default: the transform is the
+  // path that reshapes the runtime's config reads on 2.1.3. The callback is
+  // synchronous; a returned promise is awaited.
+  const useTransform = options.transform === true
+  if (useTransform) {
+    try {
+      const agent = ctx?.agent
+      const transform = agent?.transform
+      if (typeof transform !== 'function') {
+        throw new Error('the runtime exposes no agent.transform')
+      }
 
-    await transform.call(agent, (editor: AgentEditor) => {
-      for (const definition of resolved) {
-        try {
-          editor.update(definition.id, (target) => applyDefinition(target, definition))
-          registered.push(definition.id)
-        } catch (error) {
-          warnings.push(
-            `${definition.id}: agent.transform update failed: ${describeError(error)}`,
-          )
+      await transform.call(agent, (editor: AgentEditor) => {
+        for (const definition of resolved) {
+          try {
+            editor.update(definition.id, (target) => applyDefinition(target, definition))
+            registered.push(definition.id)
+          } catch (error) {
+            warnings.push(
+              `${definition.id}: agent.transform update failed: ${describeError(error)}`,
+            )
+          }
         }
-      }
-      if (resolved.length > 0) {
-        try {
-          editor.default(defaultAgent)
-        } catch (error) {
-          warnings.push(`default agent ${defaultAgent} not set: ${describeError(error)}`)
+        if (resolved.length > 0) {
+          try {
+            editor.default(defaultAgent)
+          } catch (error) {
+            warnings.push(`default agent ${defaultAgent} not set: ${describeError(error)}`)
+          }
         }
-      }
-    })
-  } catch (error) {
-    warnings.push(`agent.transform registration failed: ${describeError(error)}`)
+      })
+    } catch (error) {
+      warnings.push(`agent.transform registration failed: ${describeError(error)}`)
+    }
   }
 
-  // (2) File insurance. Always on unless explicitly disabled: this is the path
-  // that still works if the undocumented transform API changes shape.
+  // (2) The registration path. Always on unless explicitly disabled.
   const env = options.env ?? process.env
   const enabled = options.materialize !== false && env[NO_MATERIALIZE_ENV] !== '1'
+  let materializedRoster = false
 
   if (enabled) {
     try {
@@ -681,12 +711,23 @@ export async function registerAgents(
         const written = materializeAgentFiles(
           resolved,
           join(configDir, 'agents'),
-          options.fs ?? defaultFs,
+          options.fs ?? nodeMaterializeFs,
         )
         materialized.push(...written)
+        materializedRoster = true
       }
     } catch (error) {
       warnings.push(`agent file materialisation failed: ${describeError(error)}`)
+    }
+  }
+
+  // With the transform off, "registered" means the ids now available as files:
+  // an idempotent second run writes nothing, but the roster is still installed.
+  if (!useTransform && materializedRoster) {
+    for (const definition of resolved) {
+      if (typeof definition.id === 'string' && definition.id.length > 0) {
+        registered.push(definition.id)
+      }
     }
   }
 

@@ -65,11 +65,15 @@ import { registerConductorTools, isReadOnlySupervisorTool } from './register/too
 import {
   loadAgentDefinitions,
   loadFleetConfig,
+  NO_MATERIALIZE_ENV,
+  nodeMaterializeFs,
   registerAgents,
+  resolveAgentConfigDir,
   resolveAssetsDir,
 } from './register/agents'
 import {
   formatDoctorReport,
+  materializeSkillDirs,
   probeRuntime,
   type RuntimeProbe,
   type RuntimeProbeEnv,
@@ -80,8 +84,6 @@ import {
 } from './runtime/policy-authority'
 import { resolveProjectIdentity } from './runtime/project'
 import { resolveTrust } from './runtime/trust'
-import { loadSkillAssets, registerSkills } from './register/skills'
-import { registerCommands } from './register/commands'
 
 /** Stable plugin id (the runtime keys the plugin object by it). */
 export const CONDUCTOR_PLUGIN_ID = 'conductor'
@@ -218,18 +220,18 @@ export interface ConductorSetupOptions {
 }
 
 /**
- * Register the 15-agent roster, then materialise it as files.
+ * Register the 15-agent roster as V2 agent files.
  *
  * This runs on the probe-success path only: a runtime that cannot run the
- * supervisor must not advertise fourteen agents that depend on it. The roster
- * is built from the package's own assets (`assets/agents/*.md`, models from
- * `assets/fleet.json`) and registered through `register/*.ts`, which already
+ * supervisor must not advertise fifteen agents that depend on it. The roster is
+ * built from the package's own assets (`assets/agents/*.md`, models from
+ * `assets/fleet.json`) and materialised through `register/*.ts`, which already
  * turns every failure into a warning instead of an exception.
  *
- * The probe report is deliberately *not* consulted: the transform API was
- * verified end to end (a probe agent's system prompt produced its token with
- * no `--agent` flag), so registration uses it and the file materialisation
- * covers the case where the undocumented API drifts.
+ * The runtime transform is deliberately off: on OpenCode 2.1.3 it reshapes the
+ * config location (`Command.list` schema validation fails) and writes into the
+ * watched config directory. The files are what the runtime discovers, and the
+ * default agent comes from the user's config, never from `editor.default`.
  *
  * Returns the warnings so `/conductor:doctor` can report them; this function
  * never throws.
@@ -248,7 +250,11 @@ async function registerAgentRoster(
       )
     }
     const definitions = loadAgentDefinitions(assetsDir, fleet)
-    const result = await registerAgents(ctx, definitions, { env, fleet })
+    const result = await registerAgents(ctx, definitions, {
+      env,
+      fleet,
+      transform: false,
+    })
     warnings.push(...result.warnings)
     for (const warning of result.warnings) {
       console.error(`[conductor] agent roster: ${warning}`)
@@ -263,38 +269,35 @@ async function registerAgentRoster(
 }
 
 /**
- * Register the workflow skills from the package's own assets.
+ * Materialise the workflow skills as files under `<configDir>/skills`.
  *
- * Skills are additive and independent of the tool set: a runtime that refuses
- * `skill.transform` keeps its tools, and the failure is a log line the doctor
- * command can show.
+ * `skill.transform` is not the registration path either: on OpenCode 2.1.3 the
+ * transform destabilises the config location, so the skills are mirrored into
+ * the directory the runtime already watches. The mirror is idempotent, so a run
+ * with unchanged assets writes nothing. Skills are additive and independent of
+ * the tool set: a failure is a log line, never an exception.
  */
-async function registerSkillRoster(ctx: any, assetsDir: string): Promise<void> {
-  try {
-    const assets = loadSkillAssets(join(assetsDir, 'skills'))
-    const result = await registerSkills(ctx, assets)
-    for (const warning of result.warnings) {
-      console.error(`[conductor] skills: ${warning}`)
-    }
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error)
-    console.error(`[conductor] skill registration failed: ${detail}`)
-  }
-}
-
-/** Register the five conductor commands. Never throws: see `registerSkills`. */
-async function registerCommandRoster(
-  ctx: any,
-  options: Parameters<typeof registerCommands>[1],
+async function materializeSkillRoster(
+  assetsDir: string,
+  env: RuntimeProbeEnv,
 ): Promise<void> {
+  if (env[NO_MATERIALIZE_ENV] === '1') return
   try {
-    const result = await registerCommands(ctx, options)
-    for (const warning of result.warnings) {
-      console.error(`[conductor] commands: ${warning}`)
+    const configDir = resolveAgentConfigDir(env)
+    if (!configDir) {
+      console.error(
+        '[conductor] skills not materialised: neither XDG_CONFIG_HOME nor HOME is set',
+      )
+      return
     }
+    materializeSkillDirs(
+      join(assetsDir, 'skills'),
+      join(configDir, 'skills'),
+      nodeMaterializeFs,
+    )
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error)
-    console.error(`[conductor] command registration failed: ${detail}`)
+    console.error(`[conductor] skill materialisation failed: ${detail}`)
   }
 }
 
@@ -306,9 +309,8 @@ async function registerCommandRoster(
  *      local when the checkout already owns a ledger, central otherwise);
  *   2. probe the runtime — on failure, register only `supervisor_doctor`, log
  *      the report once, and stop;
- *   3. register the 15-agent roster (transform + file insurance), then the
- *      workflow skills and the five slash commands — each additive and
- *      individually non-fatal;
+ *   3. materialise the 15-agent roster and the workflow skills as files — each
+ *      additive and individually non-fatal;
  *   4. resolve the policy authority (package + user config, project may only
  *      tighten) and trust for the project root (fail-closed, never reads the
  *      project);
@@ -358,22 +360,20 @@ export async function setupConductor(
     return
   }
 
-  // The roster is additive: it is registered (and materialised as files) before
-  // the tools so a tool-registration failure cannot cost the operator their
-  // agents. Failures inside are warnings by construction.
-  const agentWarnings = await registerAgentRoster(ctx, env)
+  // The roster and the skills are additive: they are materialised as files
+  // before the tools so a tool-registration failure cannot cost the operator
+  // their agents. Failures inside are warnings by construction.
+  await registerAgentRoster(ctx, env)
 
-  // Skills and commands sit beside the roster on the same probe-success path,
-  // and each is independently non-fatal: a skills failure must not cost the
-  // commands, and neither may cost the tool set below.
+  // Files, not transforms: on OpenCode 2.1.3 `skill.transform` destabilises the
+  // config location, so the skills are mirrored into `<configDir>/skills`.
   const assetsDir = resolveAssetsDir(import.meta.dir)
-  await registerSkillRoster(ctx, assetsDir)
-  await registerCommandRoster(ctx, {
-    projectRoot,
-    assetsDir,
-    env,
-    agentWarnings,
-  })
+  await materializeSkillRoster(assetsDir, env)
+
+  // Commands are omitted until the `Command.list` schema shape is confirmed
+  // against a live instance: `command.transform` makes `Command.list` fail
+  // schema validation on OpenCode 2.1.3. `register/commands.ts` stays for the
+  // day the shape is confirmed; nothing here calls it.
 
   // Policy authority: rules come from the package bundles and the user's own
   // config; the checkout may only tighten them. A restricted snapshot covers

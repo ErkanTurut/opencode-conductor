@@ -22,8 +22,15 @@ const AGENT: MaterializableAgent = {
   id: 'x',
   description: 'd',
   mode: 'subagent',
-  model: { providerID: 'p', id: 'm' },
+  model: { providerID: 'p', id: 'm', variant: 'fast' },
   steps: 3,
+  // Deliberately supplied deny-first, the V1 order: V2 evaluates the last
+  // matching rule, so the renderer must reverse each effect group.
+  permissions: [
+    { action: 'shell', resource: 'git push*', effect: 'deny' },
+    { action: 'shell', resource: '*', effect: 'allow' },
+    { action: 'read', resource: "**/*.key", effect: 'deny' },
+  ],
   system: 'You are X.',
 }
 
@@ -78,7 +85,7 @@ describe('selectAgentRegistrationPath', () => {
 })
 
 describe('materializeAgentFiles', () => {
-  it('writes frontmatter and body the file-agent loader can read', () => {
+  it('writes V2 frontmatter and body the global agent loader can read', () => {
     const dir = tempDir()
     const written = materializeAgentFiles([AGENT], dir, io)
     const target = join(dir, 'x.md')
@@ -90,13 +97,76 @@ describe('materializeAgentFiles', () => {
     expect(content).toBe(renderAgentMarkdown(AGENT))
     expect(content.startsWith('---\n')).toBe(true)
     expect(content).toContain('mode: subagent')
-    expect(content).toContain('model: "p/m"')
+    // The variant travels as the model reference suffix.
+    expect(content).toContain('model: "p/m#fast"')
     expect(content).toContain('steps: 3')
     expect(content).toContain('You are X.')
+    expect(content).not.toContain('\npermission:\n')
+
     // Frontmatter closes before the system prompt starts.
     const [, frontmatter, body] = content.split('---')
     expect(frontmatter).toContain('mode: subagent')
+    expect(frontmatter).toContain('permissions:\n')
     expect(body.trim()).toBe('You are X.')
+  })
+
+  it('emits the permissions as an ordered action/resource/effect sequence', () => {
+    const rendered = renderAgentMarkdown(AGENT)
+    const [, frontmatter] = rendered.split('---')
+
+    expect(frontmatter).toContain(
+      [
+        'permissions:',
+        '  - action: shell',
+        "    resource: '*'",
+        '    effect: allow',
+        '  - action: shell',
+        "    resource: 'git push*'",
+        '    effect: deny',
+        '  - action: read',
+        "    resource: '**/*.key'",
+        '    effect: deny',
+      ].join('\n'),
+    )
+  })
+
+  it('orders every allow before the deny that narrows it', () => {
+    const [, frontmatter] = renderAgentMarkdown(AGENT).split('---')
+    const lines = frontmatter.split('\n').map((line) => line.trim())
+
+    const effectOf = (line: string): string | null =>
+      line.startsWith('effect:') ? line.slice('effect:'.length).trim() : null
+    const effects = lines
+      .map(effectOf)
+      .filter((effect): effect is string => effect !== null)
+    expect(effects).toEqual(['allow', 'deny', 'deny'])
+
+    // Within one action, the broad allow cannot follow the deny it narrows.
+    const shellAllow = frontmatter.indexOf('  - action: shell')
+    const shellDeny = frontmatter.lastIndexOf('  - action: shell')
+    expect(shellAllow).toBeLessThan(shellDeny)
+    expect(frontmatter.indexOf('effect: allow')).toBeLessThan(
+      frontmatter.indexOf('effect: deny'),
+    )
+  })
+
+  it('omits the permissions block when there are no rules', () => {
+    const rendered = renderAgentMarkdown({
+      id: 'bare',
+      description: 'bare',
+      mode: 'subagent',
+      system: 'Bare.',
+    })
+    expect(rendered).not.toContain('permissions:')
+  })
+
+  it('single-quotes resources and doubles an embedded quote', () => {
+    const rendered = renderAgentMarkdown({
+      id: 'quoted',
+      description: 'quoted',
+      permissions: [{ action: 'shell', resource: "git commit -m 'wip'", effect: 'deny' }],
+    })
+    expect(rendered).toContain("    resource: 'git commit -m ''wip'''")
   })
 
   it('is idempotent: a second run writes nothing and leaves the file untouched', () => {

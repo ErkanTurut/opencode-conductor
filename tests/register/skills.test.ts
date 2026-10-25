@@ -9,9 +9,9 @@
 //     transform produces warnings instead of an exception, and one refused
 //     skill does not cost the other fourteen.
 //
-// The file-fallback section at the end pins `renderAgentMarkdown`'s permission
-// block against `parseAgentMarkdown`: the fallback must reload with the same
-// effective rules, never with the runtime default `allow *`.
+// The rendering section at the end pins `renderAgentMarkdown`'s V2 permission
+// sequence against the coder asset: a materialised agent must carry the same
+// rules, never the runtime default `allow *`.
 import { afterEach, describe, expect, it } from 'bun:test'
 import {
   existsSync,
@@ -31,7 +31,10 @@ import {
   type SkillEditor,
   type SkillRegistrationContext,
 } from '../../src/register/skills'
-import { parseAgentMarkdown } from '../../src/register/agents'
+import {
+  parseAgentMarkdown,
+  type PermissionRule,
+} from '../../src/register/agents'
 import {
   renderAgentMarkdown,
   type MaterializableAgent,
@@ -292,20 +295,45 @@ describe('registerSkills', () => {
 })
 
 // ---------------------------------------------------------------------------
-// File fallback: permission-preserving rendering
+// V2 file rendering: permission-preserving rendering
 //
-// `materializeAgentFiles` is the restart-proof path, so it must not reload with
-// the runtime default `allow *`. This proof lives here because the P3 task's
-// write scope admits only `tests/register/skills.test.ts` and
-// `tests/register/commands.test.ts`; the rendering itself is in
-// `src/runtime/compat.ts`.
+// `materializeAgentFiles` is the registration path, so it must not reload with
+// the runtime default `allow *`, and the frontmatter must be the V2 shape the
+// runtime discovers globally. The rendering itself is in `src/runtime/compat.ts`.
 // ---------------------------------------------------------------------------
 
 describe('renderAgentMarkdown permissions', () => {
   const coderMarkdown = readFileSync(join(ASSETS_DIR, 'agents', 'coder.md'), 'utf8')
   const coder = parseAgentMarkdown('coder.md', coderMarkdown)
 
-  it('renders the permission block in the file-agent format', () => {
+  /** Read the `permissions:` sequence back without a YAML dependency. */
+  function parseRenderedPermissions(markdown: string): PermissionRule[] {
+    const [, frontmatter = ''] = markdown.split('---')
+    const rules: PermissionRule[] = []
+    let current: PermissionRule | null = null
+    for (const line of frontmatter.split('\n')) {
+      const action = /^\s*-\s*action:\s*(\S+)\s*$/.exec(line)
+      if (action) {
+        current = { action: action[1], resource: '', effect: 'allow' }
+        rules.push(current)
+        continue
+      }
+      const resource = /^\s+resource:\s*(.+)$/.exec(line)
+      if (resource && current) {
+        const raw = resource[1].trim()
+        current.resource =
+          raw.length >= 2 && raw.startsWith("'") && raw.endsWith("'")
+            ? raw.slice(1, -1).replace(/''/g, "'")
+            : raw
+        continue
+      }
+      const effect = /^\s+effect:\s*(\S+)\s*$/.exec(line)
+      if (effect && current) current.effect = effect[1] as PermissionRule['effect']
+    }
+    return rules
+  }
+
+  it('renders the V2 permissions sequence with runtime action names', () => {
     const rendered = renderAgentMarkdown({
       id: coder.id,
       description: coder.description,
@@ -315,23 +343,23 @@ describe('renderAgentMarkdown permissions', () => {
       permissions: coder.permissions,
     })
 
-    expect(rendered).toContain('permission:\n')
-    expect(rendered).toContain('  read:\n')
-    // Patterns are single-quoted; effects stay bare.
-    expect(rendered).toContain("    '**/.env*': deny")
-    expect(rendered).toContain("    '*': allow")
-    // Runtime actions are mapped back to the file names.
-    expect(rendered).toContain('  bash:\n')
-    expect(rendered).toContain('  task:\n')
-    expect(rendered).not.toContain('  shell:\n')
-    expect(rendered).not.toContain('  subagent:\n')
+    expect(rendered).toContain('permissions:\n')
+    expect(rendered).not.toContain('\npermission:\n')
+    // Resources are single-quoted; effects and actions stay bare.
+    expect(rendered).toContain("    resource: '**/.env*'\n    effect: deny")
+    expect(rendered).toContain("    resource: '*'\n    effect: allow")
+    // The runtime's V2 action names are written as-is.
+    expect(rendered).toContain('  - action: shell\n')
+    expect(rendered).toContain('  - action: subagent\n')
+    expect(rendered).not.toContain('action: bash')
+    expect(rendered).not.toContain('action: task')
     // The block sits inside the frontmatter, before the body.
     const [, frontmatter] = rendered.split('---')
-    expect(frontmatter).toContain('permission:')
+    expect(frontmatter).toContain('permissions:')
     expect(frontmatter).toContain('steps: 100')
   })
 
-  it('round-trips through parseAgentMarkdown with the same effective rules', () => {
+  it('writes each action allow, then ask, then deny (last matching rule wins)', () => {
     const rendered = renderAgentMarkdown({
       id: coder.id,
       description: coder.description,
@@ -341,20 +369,49 @@ describe('renderAgentMarkdown permissions', () => {
       system: coder.system,
       permissions: coder.permissions,
     })
+    const rules = parseRenderedPermissions(rendered)
 
-    const reloaded = parseAgentMarkdown('coder.md', rendered)
+    expect(rules).toHaveLength(coder.permissions?.length ?? 0)
 
-    expect(reloaded.permissions).toEqual(coder.permissions)
-    // Narrow denials still precede the broad allowance, which is the whole
-    // point: the runtime evaluates the first match.
-    const shell = (reloaded.permissions ?? []).filter((rule) => rule.action === 'shell')
-    expect(shell[0].effect).toBe('deny')
-    expect(shell.some((rule) => rule.resource === 'git push*' && rule.effect === 'deny')).toBe(true)
-    expect(shell[shell.length - 1]).toEqual({
-      action: 'shell',
-      resource: '*',
-      effect: 'allow',
+    const effectsByAction = new Map<string, string[]>()
+    for (const rule of rules) {
+      const effects = effectsByAction.get(rule.action) ?? []
+      effects.push(rule.effect)
+      effectsByAction.set(rule.action, effects)
+    }
+    const rank = (effect: string): number =>
+      effect === 'allow' ? 0 : effect === 'ask' ? 1 : 2
+    for (const effects of effectsByAction.values()) {
+      const ranks = effects.map(rank)
+      expect(ranks).toEqual([...ranks].sort((left, right) => left - right))
+    }
+
+    // The broad shell allow is written before every shell deny, so the deny is
+    // the last match.
+    const shell = rules.filter((rule) => rule.action === 'shell')
+    expect(shell[0]).toEqual({ action: 'shell', resource: '*', effect: 'allow' })
+    expect(shell[shell.length - 1].effect).toBe('deny')
+    expect(shell.some((rule) => rule.resource === 'git push*' && rule.effect === 'deny')).toBe(
+      true,
+    )
+  })
+
+  it('keeps every rule and action when it renders', () => {
+    const rendered = renderAgentMarkdown({
+      id: coder.id,
+      description: coder.description,
+      mode: coder.mode,
+      model: coder.model,
+      steps: coder.steps,
+      system: coder.system,
+      permissions: coder.permissions,
     })
+    const key = (rule: PermissionRule): string =>
+      `${rule.action}|${rule.resource}|${rule.effect}`
+
+    expect(parseRenderedPermissions(rendered).map(key).sort()).toEqual(
+      [...(coder.permissions ?? [])].map(key).sort(),
+    )
   })
 
   it('omits the block for an agent without permissions', () => {
@@ -364,10 +421,10 @@ describe('renderAgentMarkdown permissions', () => {
       mode: 'subagent',
       system: 'Plain.',
     }
-    expect(renderAgentMarkdown(plain)).not.toContain('permission:')
+    expect(renderAgentMarkdown(plain)).not.toContain('permissions:')
   })
 
-  it('quotes a pattern containing a single quote so the frontmatter survives', () => {
+  it('quotes a pattern containing a single quote by doubling it', () => {
     const rendered = renderAgentMarkdown({
       id: 'quoted',
       description: 'quoted',
@@ -377,14 +434,11 @@ describe('renderAgentMarkdown permissions', () => {
       ],
     })
 
-    // Double-quoted because a single-quoted scalar cannot carry an unescaped
-    // quote through the markdown reader.
-    expect(rendered).toContain(`    "it's": deny`)
-    // `conductor.md` so the parser's non-conductor env deny is not appended and
-    // the comparison stays about the rendered rules.
-    expect(parseAgentMarkdown('conductor.md', rendered).permissions).toEqual([
-      { action: 'read', resource: "it's", effect: 'deny' },
+    expect(rendered).toContain("    resource: 'it''s'")
+    // Allow first, deny last: the V2 evaluator takes the last match.
+    expect(parseRenderedPermissions(rendered)).toEqual([
       { action: 'read', resource: '*', effect: 'allow' },
+      { action: 'read', resource: "it's", effect: 'deny' },
     ])
   })
 })

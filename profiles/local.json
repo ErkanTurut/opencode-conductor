@@ -1,0 +1,43 @@
+{
+  "_comment": "ADDITIVE OVERRIDES over the canonical root 'opencode.json' permission block. The root file is the single permission authority for OpenCode itself; this profile only adds supervisor-policy rules consumed by the plugin's fail-closed shell gate and MCP scope check. NOTE: operation_mode 'observe' makes the hook deny mutating shell commands with no matching rule (read-only commands still pass). Keys starting with '_' are ignored by the loader.",
+  "name": "Local Development Profile",
+  "description": "Human-present, fully interactive development. All mutations require confirmation.",
+  "operation_mode": "observe",
+  "policy_profile": "local",
+  "risk_class_limit": "medium",
+  "data_class_limit": "internal",
+  "model_overrides": {},
+  "permissions": [
+    { "action": "read", "resource": "*", "effect": "allow" },
+    { "action": "edit", "resource": "*", "effect": "ask" },
+    { "action": "shell", "resource": "git push *", "effect": "deny" },
+    { "action": "shell", "resource": "git push --force*", "effect": "deny" },
+    { "action": "shell", "resource": "git push *--force*", "effect": "deny" },
+    { "action": "shell", "resource": "git push origin develop *", "effect": "ask" },
+    { "action": "shell", "resource": "git reset --hard *", "effect": "deny" },
+    { "action": "shell", "resource": "git clean *", "effect": "deny" },
+    { "action": "shell", "resource": "rm -rf *", "effect": "ask" },
+    { "action": "shell", "resource": "sudo **", "effect": "deny" },
+    { "action": "shell", "resource": "chmod *", "effect": "deny" },
+    { "action": "shell", "resource": "chown *", "effect": "deny" },
+    { "action": "read", "resource": "**/.env*", "effect": "deny" },
+    { "action": "read", "resource": "**/*.key", "effect": "deny" },
+    { "action": "edit", "resource": "**/.env*", "effect": "deny" },
+    { "action": "edit", "resource": "**/*.key", "effect": "deny" }
+  ],
+  "_comment_mcp_profiles": "Observe mode: repository tooling + document ingestion only; every other MCP namespace is denied by the hook.",
+  "mcp_profiles": ["core-readonly", "document"],
+  "human_gates": ["plan_approval", "merge_approval"],
+  "budget": {
+    "max_concurrent_mutating_tasks": 1,
+    "max_concurrent_scouts": 2,
+    "max_attempts_per_task": 2,
+    "max_task_wall_time_ms": 1200000,
+    "max_run_wall_time_ms": 7200000,
+    "unattended_merge_enabled": false
+  },
+  "validation_commands": [
+    "bun run format",
+    "bun run lint"
+  ]
+}

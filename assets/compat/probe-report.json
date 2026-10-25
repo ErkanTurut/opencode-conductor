@@ -1,0 +1,58 @@
+{
+  "generatedAt": "2026-10-25T16:40:20.812Z",
+  "verdict": "inconclusive",
+  "checks": {
+    "auth": true,
+    "service": true,
+    "agentCreated": false,
+    "rootLoad": false,
+    "probeLoad": false,
+    "systemPromptEffect": true,
+    "defaultAgent": true
+  },
+  "detail": [
+    {
+      "name": "auth",
+      "ok": true,
+      "detail": "copied the local auth file into the throwaway HOME"
+    },
+    {
+      "name": "service",
+      "ok": true,
+      "detail": "service set port 62415 exit=0"
+    },
+    {
+      "name": "agentCreated",
+      "ok": false,
+      "detail": "agent not created"
+    },
+    {
+      "name": "rootLoad",
+      "ok": false,
+      "detail": "package root not in the log"
+    },
+    {
+      "name": "probeLoad",
+      "ok": false,
+      "detail": "probe plugin not in the log"
+    },
+    {
+      "name": "systemPromptEffect",
+      "ok": true,
+      "detail": "model echoed the probe token"
+    },
+    {
+      "name": "defaultAgent",
+      "ok": true,
+      "detail": "token echoed without an agent flag, so the default agent produced it"
+    }
+  ],
+  "evidence": {
+    "agentCount": 0,
+    "runExit": 0,
+    "runStdoutTail": "{\"type\":\"step_start\",\"timestamp\":1792946420674,\"sessionID\":\"ses_e8c10cbccffeqdb2QViMTNNLAl\",\"part\":{\"id\":\"prt_173ef3bc2001lwnmkzer5bkHfz\",\"sessionID\":\"ses_e8c10cbccffeqdb2QViMTNNLAl\",\"messageID\":\"msg_173ef3483001a4FekknnttTGMm\",\"type\":\"step-start\"}}\n{\"type\":\"text\",\"timestamp\":1792946420793,\"sessionID\":\"ses_e8c10cbccffeqdb2QViMTNNLAl\",\"part\":{\"id\":\"prt_173ef3483001a4FekknnttTGMm_text-0\",\"sessionID\":\"ses_e8c10cbccffeqdb2QViMTNNLAl\",\"messageID\":\"msg_173ef3483001a4FekknnttTGMm\",\"type\":\"text\",\"text\":\"PROBE_OK_7731\",\"time\":{\"start\":1792946418823,\"end\":1792946420793}}}\n",
+    "runStderrTail": "",
+    "logBytes": 342,
+    "port": 62415
+  }
+}

@@ -1,0 +1,56 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://opencode-supervisor/schemas/evidence.schema.json",
+  "title": "Task Evidence",
+  "type": "object",
+  "required": ["attempt_id", "task_id"],
+  "properties": {
+    "attempt_id": { "type": "string" },
+    "task_id": { "type": "string" },
+    "model_provider": { "type": "string" },
+    "model_id": { "type": "string" },
+    "model_variant": { "type": ["string", "null"] },
+    "started_at": { "type": "string", "format": "date-time" },
+    "finished_at": { "type": "string", "format": "date-time" },
+    "exit_code": { "type": "integer" },
+    "failure_class": { "type": ["string", "null"] },
+    "changed_files": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "usage": {
+      "type": "object",
+      "properties": {
+        "input_tokens": { "type": "integer" },
+        "output_tokens": { "type": "integer" },
+        "total_tokens": { "type": "integer" }
+      }
+    },
+    "cost": {
+      "type": "object",
+      "properties": {
+        "estimated": { "type": "number" },
+        "actual": { "type": "number" },
+        "currency": { "type": "string" }
+      }
+    },
+    "verifications": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "command": { "type": "string" },
+          "exit_code": { "type": "integer" },
+          "duration_ms": { "type": "integer" },
+          "output_hash": { "type": "string" },
+          "stdout_path": { "type": "string" },
+          "stderr_path": { "type": "string" }
+        }
+      }
+    },
+    "open_risks": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  }
+}

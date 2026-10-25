@@ -1,0 +1,35 @@
+{
+  "name": "opencode-conductor",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "main": "./index.ts",
+  "exports": {
+    ".": "./index.ts"
+  },
+  "types": "./index.ts",
+  "files": [
+    "index.ts",
+    "src",
+    "config",
+    "schemas",
+    "profiles",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "bun build src/cli.ts --outdir dist --target bun",
+    "typecheck": "bun run scripts/typecheck-baseline.ts",
+    "typecheck:raw": "tsc --noEmit",
+    "test": "bun test",
+    "test:watch": "bun test --watch",
+    "supervisor:run": "bun run src/cli.ts run",
+    "supervisor:resume": "bun run src/cli.ts resume",
+    "fleet-ui": "bun run src/fleet-ui/server.ts"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "1.18.15"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  }
+}

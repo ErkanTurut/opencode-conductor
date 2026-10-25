@@ -1,0 +1,241 @@
+{
+  "models": {
+    "opencode/deepseek-v4-pro": {
+      "enabled": true
+    }
+  },
+  "extraModels": {
+    "vercel/meta/muse-spark-1.2": {
+      "providerId": "vercel",
+      "modelId": "meta/muse-spark-1.2",
+      "modelFamily": "meta",
+      "roleSuitability": {
+        "fast-triage": 0.72,
+        "architecture": 0.9,
+        "implementation": 0.85,
+        "ui-visual": 0.55,
+        "testing": 0.7,
+        "critique": 0.88,
+        "security": 0.95,
+        "integration": 0.82
+      },
+      "toolSupport": true,
+      "imageSupport": false,
+      "contextLimit": 1000000,
+      "costPer1kTokens": null,
+      "fallbackChain": [
+        "vercel/spacexai/grok-4.5",
+        "opencode/deepseek-v4-pro"
+      ]
+    },
+    "vercel/openai/gpt-5.6-luna": {
+      "providerId": "vercel",
+      "modelId": "openai/gpt-5.6-luna",
+      "modelFamily": "openai",
+      "roleSuitability": {
+        "fast-triage": 0.65,
+        "architecture": 0.8,
+        "implementation": 0.84,
+        "ui-visual": 0.93,
+        "testing": 0.72,
+        "critique": 0.86,
+        "security": 0.8,
+        "integration": 0.8
+      },
+      "toolSupport": true,
+      "imageSupport": true,
+      "contextLimit": 1000000,
+      "costPer1kTokens": null,
+      "fallbackChain": [
+        "vercel/minimax/minimax-m3",
+        "opencode/kimi-k3"
+      ]
+    },
+    "vercel/minimax/minimax-m3": {
+      "providerId": "vercel",
+      "modelId": "minimax/minimax-m3",
+      "modelFamily": "minimax",
+      "roleSuitability": {
+        "fast-triage": 0.88,
+        "architecture": 0.5,
+        "implementation": 0.62,
+        "ui-visual": 0.45,
+        "testing": 0.85,
+        "critique": 0.58,
+        "security": 0.52,
+        "integration": 0.55
+      },
+      "toolSupport": true,
+      "imageSupport": false,
+      "contextLimit": 1000000,
+      "costPer1kTokens": null,
+      "fallbackChain": [
+        "deepseek/deepseek-v4-flash",
+        "opencode/kimi-k3"
+      ]
+    },
+    "deepseek/deepseek-v4-flash": {
+      "providerId": "deepseek",
+      "modelId": "deepseek-v4-flash",
+      "modelFamily": "deepseek",
+      "variant": "max",
+      "roleSuitability": {
+        "fast-triage": 0.96,
+        "architecture": 0.42,
+        "implementation": 0.58,
+        "ui-visual": 0.3,
+        "testing": 0.68,
+        "critique": 0.5,
+        "security": 0.48,
+        "integration": 0.48
+      },
+      "toolSupport": true,
+      "imageSupport": false,
+      "contextLimit": 1000000,
+      "costPer1kTokens": null,
+      "fallbackChain": [
+        "vercel/minimax/minimax-m3",
+        "opencode/kimi-k3"
+      ]
+    },
+    "vercel/spacexai/grok-4.5": {
+      "providerId": "vercel",
+      "modelId": "spacexai/grok-4.5",
+      "modelFamily": "grok",
+      "roleSuitability": {
+        "fast-triage": 0.7,
+        "architecture": 0.95,
+        "implementation": 0.94,
+        "ui-visual": 0.75,
+        "testing": 0.8,
+        "critique": 0.9,
+        "security": 0.85,
+        "integration": 0.92
+      },
+      "toolSupport": true,
+      "imageSupport": false,
+      "contextLimit": 500000,
+      "costPer1kTokens": null,
+      "fallbackChain": [
+        "vercel/meta/muse-spark-1.2",
+        "opencode/gpt-5.6-luna"
+      ]
+    },
+    "opencode/deepseek-v4.1-flash-free": {
+      "providerId": "opencode",
+      "modelId": "deepseek-v4.1-flash-free",
+      "modelFamily": "deepseek",
+      "variant": "max",
+      "roleSuitability": {
+        "fast-triage": 0.96,
+        "architecture": 0.45,
+        "implementation": 0.86,
+        "ui-visual": 0.5,
+        "testing": 0.84,
+        "critique": 0.5,
+        "security": 0.5,
+        "integration": 0.82
+      },
+      "toolSupport": true,
+      "imageSupport": false,
+      "contextLimit": 200000,
+      "costPer1kTokens": null,
+      "fallbackChain": [
+        "opencode/deepseek-v4-pro"
+      ]
+    },
+    "opencode/glm-5.3-flash-free": {
+      "providerId": "opencode",
+      "modelId": "glm-5.3-flash-free",
+      "modelFamily": "glm",
+      "roleSuitability": {
+        "fast-triage": 0.88,
+        "architecture": 0.9,
+        "implementation": 0.8,
+        "ui-visual": 0.5,
+        "testing": 0.72,
+        "critique": 0.9,
+        "security": 0.92,
+        "integration": 0.78
+      },
+      "toolSupport": true,
+      "imageSupport": false,
+      "contextLimit": 200000,
+      "costPer1kTokens": null,
+      "fallbackChain": []
+    },
+    "opencode/muse-spark-1.3-contributor-free": {
+      "providerId": "opencode",
+      "modelId": "muse-spark-1.3-contributor-free",
+      "modelFamily": "meta",
+      "roleSuitability": {
+        "fast-triage": 0.92,
+        "architecture": 0.66,
+        "implementation": 0.6,
+        "ui-visual": 0.5,
+        "testing": 0.65,
+        "critique": 0.7,
+        "security": 0.7,
+        "integration": 0.6
+      },
+      "toolSupport": true,
+      "imageSupport": false,
+      "contextLimit": 1000000,
+      "costPer1kTokens": null,
+      "fallbackChain": [
+        "vercel/meta/muse-spark-1.2"
+      ]
+    },
+    "opencode/mimo-v2.6-flash-free": {
+      "providerId": "opencode",
+      "modelId": "mimo-v2.6-flash-free",
+      "modelFamily": "mimo",
+      "roleSuitability": {
+        "fast-triage": 0.9,
+        "architecture": 0.4,
+        "implementation": 0.6,
+        "ui-visual": 0.88,
+        "testing": 0.6,
+        "critique": 0.45,
+        "security": 0.4,
+        "integration": 0.5
+      },
+      "toolSupport": true,
+      "imageSupport": false,
+      "contextLimit": 200000,
+      "costPer1kTokens": null,
+      "fallbackChain": []
+    }
+  },
+  "fallbackChains": {
+    "architect": [
+      "opencode/glm-5.3-flash-free"
+    ],
+    "critic": [
+      "opencode/glm-5.3-flash-free"
+    ],
+    "security-critic": [
+      "opencode/glm-5.3-flash-free"
+    ],
+    "coder": [
+      "opencode/deepseek-v4.1-flash-free",
+      "opencode/deepseek-v4-pro",
+      "opencode/deepseek-v4-flash"
+    ],
+    "test-engineer": [
+      "opencode/deepseek-v4.1-flash-free",
+      "opencode/deepseek-v4-pro"
+    ],
+    "scout": [
+      "opencode/deepseek-v4.1-flash-free",
+      "opencode/deepseek-v4-flash"
+    ]
+  },
+  "agentOverrides": {
+    "external-scout": {
+      "modelRef": "opencode/kimi-k3"
+    }
+  },
+  "slotDefaults": {},
+  "steps": {}
+}

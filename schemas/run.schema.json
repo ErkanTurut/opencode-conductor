@@ -1,0 +1,66 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://opencode-supervisor/schemas/run.schema.json",
+  "title": "Run Contract",
+  "type": "object",
+  "required": ["run_id", "objective", "acceptance_criteria", "risk_class", "operation_mode"],
+  "properties": {
+    "run_id": { "type": "string" },
+    "parent_run_id": { "type": ["string", "null"] },
+    "objective": { "type": "string", "minLength": 1 },
+    "non_goals": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "acceptance_criteria": {
+      "type": "array",
+      "items": { "type": "string" },
+      "minItems": 1
+    },
+    "risk_class": {
+      "type": "string",
+      "enum": ["low", "medium", "high", "critical"]
+    },
+    "data_class": {
+      "type": "string",
+      "enum": ["public", "internal", "confidential", "regulated"],
+      "default": "internal"
+    },
+    "operation_mode": {
+      "type": "string",
+      "enum": ["observe", "assisted", "autonomous-low-risk", "unattended", "release"]
+    },
+    "policy_profile": {
+      "type": "string",
+      "default": "assisted"
+    },
+    "budget": {
+      "type": "object",
+      "properties": {
+        "max_concurrent_mutating_tasks": { "type": "integer", "default": 2 },
+        "max_concurrent_scouts": { "type": "integer", "default": 4 },
+        "max_dag_depth": { "type": "integer", "default": 8 },
+        "max_repair_rounds": { "type": "integer", "default": 3 },
+        "max_attempts_per_task": { "type": "integer", "default": 2 },
+        "max_task_wall_time_ms": { "type": "integer", "default": 1200000 },
+        "max_run_wall_time_ms": { "type": "integer", "default": 7200000 },
+        "max_plan_model_calls": { "type": "integer", "default": 2 },
+        "independent_reviewers": { "type": "integer", "default": 2 },
+        "unattended_merge_enabled": { "type": "boolean", "default": false }
+      }
+    },
+    "verification_commands": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": ["bun run format", "bun run lint", "bun run test"]
+    },
+    "human_gates": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Gates that require human approval before proceeding"
+    },
+    "deadline_at": { "type": ["string", "null"], "format": "date-time" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "state": { "type": "string" }
+  }
+}

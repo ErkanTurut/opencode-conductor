@@ -1,0 +1,27 @@
+{
+  "_comment": "JEV (judge ensemble verdicts) config. VALUES BELOW ARE EXAMPLES (defaults, shown for reference) — the file ships with JEV OFF. Keys starting with '_' are ignored by the loader. Precedence: built-in defaults < jev.json < JEV_* env vars < per-run override. Set enabled:true (or JEV_ENABLED=1) to turn JEV on deliberately.",
+  "enabled": false,
+  "_comment_enabled": "Master toggle — ships OFF. Env override: JEV_ENABLED=1 (truthy: 1/true/yes/on; falsy: 0/false/no/off).",
+  "model": "typesafe-ai/jev",
+  "_comment_model": "EXAMPLE model ref. Env override: JEV_MODEL.",
+  "timeoutMs": 4000,
+  "_comment_timeoutMs": "EXAMPLE per-call timeout in ms (positive integer). Env override: JEV_TIMEOUT_MS.",
+  "maxStateChars": 20000,
+  "_comment_maxStateChars": "EXAMPLE cap on serialized state chars sent for judgment. Env override: JEV_MAX_STATE_CHARS.",
+  "thresholds": {
+    "_comment": "EXAMPLE probability thresholds in [0, 1], except contractScoreMin (finite number >= 0). Env overrides: JEV_SEVERITY_THRESHOLD, JEV_SEVERITY_UPGRADE_THRESHOLD, JEV_CONTRACT_SCORE_THRESHOLD, JEV_VERIFIABLE_THRESHOLD, JEV_RISKY_THRESHOLD, JEV_NEEDS_HUMAN_THRESHOLD.",
+    "severityMin": 0.7,
+    "severityUpgradeMin": 0.85,
+    "contractScoreMin": 2.5,
+    "verifiableMin": 0.7,
+    "riskyMin": 0.85,
+    "needsHumanMin": 0.75
+  },
+  "budget": {
+    "_comment": "EXAMPLE per-run call/token budgets (positive integers). Env overrides: JEV_MAX_CALLS_PER_RUN, JEV_MAX_INPUT_TOKENS_PER_RUN.",
+    "maxCallsPerRun": 20,
+    "maxInputTokensPerRun": 200000
+  },
+  "zeroDataRetention": true,
+  "_comment_zeroDataRetention": "Zero data retention is ON. When true, JEV calls must not retain payload data. Env override: JEV_ZERO_DATA_RETENTION=1. Remote egress is additionally gated per-run by data class: confidential/regulated payloads are never sent (public/internal only)."
+}

@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "models": {
+    "architect": { "model": "opencode-go/mimo-v2.6-pro" },
+    "build-verifier": { "model": "opencode-go/deepseek-v4.1-flash", "variant": "max" },
+    "coder": { "model": "opencode-go/deepseek-v4.1-flash", "variant": "max" },
+    "conductor": { "model": "opencode-go/mimo-v2.6-pro" },
+    "critic": { "model": "opencode-go/mimo-v2.6-pro" },
+    "external-scout": { "model": "opencode-go/deepseek-v4.1-flash", "variant": "max" },
+    "frontend-specialist": { "model": "opencode-go/deepseek-v4.1-flash", "variant": "max" },
+    "integrator": { "model": "opencode-go/deepseek-v4.1-flash", "variant": "max" },
+    "memory-curator": { "model": "opencode-go/deepseek-v4.1-flash", "variant": "max" },
+    "requirements-refiner": { "model": "opencode-go/mimo-v2.6-pro" },
+    "scout": { "model": "opencode-go/deepseek-v4.1-flash", "variant": "max" },
+    "security-critic": { "model": "opencode-go/mimo-v2.6-pro" },
+    "test-engineer": { "model": "opencode-go/deepseek-v4.1-flash", "variant": "max" },
+    "visual-sketch-translator": { "model": "opencode/mimo-v2.6-flash-free" },
+    "writing-reviewer": { "model": "opencode-go/gemini-4-argon-contributor", "variant": "high" }
+  },
+  "defaults": {
+    "fallbackModel": "opencode-go/deepseek-v4.1-flash"
+  }
+}

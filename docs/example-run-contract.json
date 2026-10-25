@@ -1,0 +1,30 @@
+{
+  "run_id": "run-1723110400-a1b2c3",
+  "objective": "Add dark mode toggle to account settings",
+  "non_goals": [
+    "System color scheme detection",
+    "Per-component theme overrides"
+  ],
+  "acceptance_criteria": [
+    "Toggle in Settings page switches between light and dark themes",
+    "Preference persists across page refresh (localStorage)",
+    "Tailwind dark: classes applied correctly to main layout components",
+    "bun run lint passes",
+    "bun run test passes"
+  ],
+  "risk_class": "low",
+  "data_class": "internal",
+  "operation_mode": "assisted",
+  "policy_profile": "assisted",
+  "verification_commands": [
+    "bun run format",
+    "bun run lint",
+    "bun run test"
+  ],
+  "human_gates": [
+    "plan_approval",
+    "merge_approval"
+  ],
+  "created_at": "2026-08-08T12:00:00Z",
+  "state": "created"
+}

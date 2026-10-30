@@ -433,11 +433,13 @@ describe('conductor:doctor', () => {
 // ---------------------------------------------------------------------------
 
 describe('setupConductor wiring', () => {
-  it('registers the tools without the agent/skill/command transforms', async () => {
+  it('registers agents and skills through transforms, without files or commands', async () => {
     const projectRoot = tempDir('conductor-wiring-project-')
     const home = tempDir('conductor-wiring-home-')
     const registeredCommands: CommandDefinition[] = []
     const registeredTools: string[] = []
+    const registeredAgents: string[] = []
+    const registeredSkills: string[] = []
     const transformCalls: string[] = []
     const logged: string[] = []
 
@@ -447,15 +449,26 @@ describe('setupConductor wiring', () => {
         project: { canonical: projectRoot, id: 'prj_wiring' },
       },
       agent: {
-        transform() {
+        async transform(callback: (editor: any) => void) {
           transformCalls.push('agent')
-          throw new Error('the runtime refused the agent transform')
+          callback({
+            update(id: string, apply: (agent: Record<string, unknown>) => void) {
+              const agent: Record<string, unknown> = {}
+              apply(agent)
+              registeredAgents.push(id)
+            },
+            default() {},
+          })
         },
       },
       skill: {
-        transform() {
+        async transform(callback: (editor: any) => void) {
           transformCalls.push('skill')
-          throw new Error('the runtime refused the skill transform')
+          callback({
+            add(asset: { id: string }) {
+              registeredSkills.push(asset.id)
+            },
+          })
         },
       },
       command: {
@@ -492,19 +505,24 @@ describe('setupConductor wiring', () => {
       console.error = originalError
     }
 
-    // Files are the registration path: no transform runs for any of the three
-    // locations, and commands are omitted until the schema shape is confirmed.
-    expect(transformCalls).toEqual([])
+    // Runtime registration is the default path; commands stay omitted.
+    expect(transformCalls).toEqual(['agent', 'skill'])
     expect(registeredCommands).toEqual([])
-    // The roster and the skills landed as files instead.
-    expect(existsSync(join(home, '.config', 'opencode', 'agents', 'conductor.md'))).toBe(true)
+    expect(registeredAgents).toHaveLength(15)
+    expect(registeredAgents).toContain('conductor')
+    expect(registeredSkills).toHaveLength(15)
+    expect(registeredSkills).toContain('closeout')
+
+    // No files are written into the user's global config.
+    expect(existsSync(join(home, '.config', 'opencode', 'agents', 'conductor.md'))).toBe(false)
     expect(existsSync(join(home, '.config', 'opencode', 'skills', 'closeout', 'SKILL.md'))).toBe(
-      true,
+      false,
     )
+
     // The tool set is unaffected.
     expect(registeredTools.length).toBeGreaterThan(10)
     expect(registeredTools).toContain('supervisor_init_run')
-    // And no transform failure was logged: nothing tried the transform path.
-    expect(logged.some((line) => line.includes('transform'))).toBe(false)
+    // No transform failure was logged.
+    expect(logged.some((line) => line.includes('transform failed'))).toBe(false)
   })
 })

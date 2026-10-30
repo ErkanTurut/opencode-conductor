@@ -60,17 +60,19 @@ export * from './runtime/detect'
 // the package's `tsc --noEmit` baseline rejects `.ts`-suffixed imports (TS5097).
 // ---------------------------------------------------------------------------
 import { join } from 'node:path'
+import { Plugin } from '@opencode/plugin'
 import { resolveSupervisorConfig, registerSupervisorTools, type ToolRegistrar } from './plugin'
 import { registerConductorTools, isReadOnlySupervisorTool } from './register/tools'
+import { registerConductorRpc } from './rpc/register'
 import {
   loadAgentDefinitions,
   loadFleetConfig,
-  NO_MATERIALIZE_ENV,
   nodeMaterializeFs,
   registerAgents,
   resolveAgentConfigDir,
   resolveAssetsDir,
 } from './register/agents'
+import { loadSkillAssets, registerSkills } from './register/skills'
 import {
   formatDoctorReport,
   materializeSkillDirs,
@@ -87,6 +89,13 @@ import { resolveTrust } from './runtime/trust'
 
 /** Stable plugin id (the runtime keys the plugin object by it). */
 export const CONDUCTOR_PLUGIN_ID = 'conductor'
+
+/**
+ * Explicit file fallback. The default is runtime registration through
+ * `ctx.agent.transform` / `ctx.skill.transform`; set `CONDUCTOR_MATERIALIZE=1`
+ * only when the host's transform APIs are unavailable.
+ */
+export const MATERIALIZE_ENV_VAR = 'CONDUCTOR_MATERIALIZE'
 
 /** Stable refusal code for "the policy authority is restricted". */
 export const POLICY_RESTRICTED_CODE = 'policy_restricted' as const
@@ -220,18 +229,19 @@ export interface ConductorSetupOptions {
 }
 
 /**
- * Register the 15-agent roster as V2 agent files.
+ * Register the 15-agent roster at runtime.
  *
  * This runs on the probe-success path only: a runtime that cannot run the
  * supervisor must not advertise fifteen agents that depend on it. The roster is
  * built from the package's own assets (`assets/agents/*.md`, models from
- * `assets/fleet.json`) and materialised through `register/*.ts`, which already
- * turns every failure into a warning instead of an exception.
+ * `assets/fleet.json`) and registered through `ctx.agent.transform` by
+ * `register/*.ts`, which already turns every failure into a warning instead of
+ * an exception.
  *
- * The runtime transform is deliberately off: on OpenCode 2.1.3 it reshapes the
- * config location (`Command.list` schema validation fails) and writes into the
- * watched config directory. The files are what the runtime discovers, and the
- * default agent comes from the user's config, never from `editor.default`.
+ * The file path is an explicit fallback (`CONDUCTOR_MATERIALIZE=1`), not the
+ * default: a global install must not clone its roster into the user's config.
+ * The default agent is whatever the user's config names; `editor.default` is
+ * opt-in so an unrelated project is not forced onto the conductor.
  *
  * Returns the warnings so `/conductor:doctor` can report them; this function
  * never throws.
@@ -253,7 +263,9 @@ async function registerAgentRoster(
     const result = await registerAgents(ctx, definitions, {
       env,
       fleet,
-      transform: false,
+      transform: true,
+      materialize: env[MATERIALIZE_ENV_VAR] === '1',
+      setDefault: env.CONDUCTOR_SET_DEFAULT_AGENT === '1',
     })
     warnings.push(...result.warnings)
     for (const warning of result.warnings) {
@@ -269,35 +281,42 @@ async function registerAgentRoster(
 }
 
 /**
- * Materialise the workflow skills as files under `<configDir>/skills`.
+ * Register the workflow skills at runtime.
  *
- * `skill.transform` is not the registration path either: on OpenCode 2.1.3 the
- * transform destabilises the config location, so the skills are mirrored into
- * the directory the runtime already watches. The mirror is idempotent, so a run
- * with unchanged assets writes nothing. Skills are additive and independent of
- * the tool set: a failure is a log line, never an exception.
+ * `ctx.skill.transform(editor => editor.add(...))` is the default path on
+ * OpenCode 2.2+. The file mirror is the explicit fallback
+ * (`CONDUCTOR_MATERIALIZE=1`), used only when the host cannot register skills
+ * in memory. Skills are additive and independent of the tool set: a failure is
+ * a log line, never an exception.
  */
-async function materializeSkillRoster(
+async function registerSkillRoster(
+  ctx: any,
   assetsDir: string,
   env: RuntimeProbeEnv,
 ): Promise<void> {
-  if (env[NO_MATERIALIZE_ENV] === '1') return
   try {
-    const configDir = resolveAgentConfigDir(env)
-    if (!configDir) {
-      console.error(
-        '[conductor] skills not materialised: neither XDG_CONFIG_HOME nor HOME is set',
-      )
-      return
+    const assets = loadSkillAssets(join(assetsDir, 'skills'))
+    const result = await registerSkills(ctx, assets)
+    for (const warning of result.warnings) {
+      console.error(`[conductor] skills: ${warning}`)
     }
-    materializeSkillDirs(
-      join(assetsDir, 'skills'),
-      join(configDir, 'skills'),
-      nodeMaterializeFs,
-    )
+    if (env[MATERIALIZE_ENV_VAR] === '1') {
+      const configDir = resolveAgentConfigDir(env)
+      if (!configDir) {
+        console.error(
+          '[conductor] skills not materialised: neither XDG_CONFIG_HOME nor HOME is set',
+        )
+        return
+      }
+      materializeSkillDirs(
+        join(assetsDir, 'skills'),
+        join(configDir, 'skills'),
+        nodeMaterializeFs,
+      )
+    }
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error)
-    console.error(`[conductor] skill materialisation failed: ${detail}`)
+    console.error(`[conductor] skill registration failed: ${detail}`)
   }
 }
 
@@ -309,8 +328,8 @@ async function materializeSkillRoster(
  *      local when the checkout already owns a ledger, central otherwise);
  *   2. probe the runtime — on failure, register only `supervisor_doctor`, log
  *      the report once, and stop;
- *   3. materialise the 15-agent roster and the workflow skills as files — each
- *      additive and individually non-fatal;
+ *   3. register the 15-agent roster and the workflow skills at runtime — each
+ *      additive and individually non-fatal; files are an explicit fallback;
  *   4. resolve the policy authority (package + user config, project may only
  *      tighten) and trust for the project root (fail-closed, never reads the
  *      project);
@@ -360,15 +379,13 @@ export async function setupConductor(
     return
   }
 
-  // The roster and the skills are additive: they are materialised as files
-  // before the tools so a tool-registration failure cannot cost the operator
-  // their agents. Failures inside are warnings by construction.
+  // The roster and the skills are additive: they are registered before the
+  // tools so a tool-registration failure cannot cost the operator their agents.
+  // Failures inside are warnings by construction.
   await registerAgentRoster(ctx, env)
 
-  // Files, not transforms: on OpenCode 2.1.3 `skill.transform` destabilises the
-  // config location, so the skills are mirrored into `<configDir>/skills`.
   const assetsDir = resolveAssetsDir(import.meta.dir)
-  await materializeSkillRoster(assetsDir, env)
+  await registerSkillRoster(ctx, assetsDir, env)
 
   // Commands are omitted until the `Command.list` schema shape is confirmed
   // against a live instance: `command.transform` makes `Command.list` fail
@@ -422,17 +439,29 @@ export async function setupConductor(
       hint: trust.hint,
     })
   })
+
+  // Read-only GUI surface. Deliberately last: the tool set is the supervisor's
+  // authority and must be registered even if a host predates `ctx.rpc`. The
+  // handlers close over the resolved layout, so the GUI can read state but can
+  // never name a path. No-op (with a warning) on runtimes without rpc.register.
+  await registerConductorRpc(ctx, {
+    projectRoot,
+    layout: identity.layout,
+    trusted: trust.trusted,
+    policyRestricted: authority.restricted,
+    assetsDir,
+  })
 }
 
 /**
  * The global plugin object — the runtime contract. `id` keys the plugin; only
  * `setup(ctx)` is called, and it is the production wiring of `setupConductor`.
  */
-export const conductorPlugin = {
+export const conductorPlugin = Plugin.define({
   id: CONDUCTOR_PLUGIN_ID,
   async setup(ctx: any) {
     await setupConductor(ctx)
   },
-}
+})
 
 export default conductorPlugin

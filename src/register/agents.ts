@@ -94,11 +94,14 @@ export interface RegisterAgentsResult {
   registered: string[]
   defaultAgent: string
   materialized: string[]
+  registration: 'transform' | 'files' | 'none'
   warnings: string[]
 }
 
 /** The mutable agent object the runtime hands to an `update` callback. */
 export interface MutableAgentConfig {
+  /** Required by OpenCode 2.2's `Agent.Info`; the roster uses the id. */
+  name?: string
   description?: string
   mode?: string
   system?: string
@@ -128,15 +131,14 @@ export interface RegisterAgentsOptions {
   /** The fleet whose models/fallback decide the unknown-model policy. */
   fleet?: FleetConfig | null
   /**
-   * Register through `ctx.agent.transform` as well. Off by default: on
-   * OpenCode 2.1.3 the transform destabilises the config location (commands
-   * fail `Command.list` schema validation, and writes into the watched config
-   * directory cause reload storms), so files are the registration path. The
-   * code is kept for tests and experiments.
+   * Register through `ctx.agent.transform`. On by default for OpenCode 2.2+.
+   * Set `false` to force the file fallback.
    */
   transform?: boolean
-  /** Disable file materialization (the env switch also disables it). */
+  /** Also materialize files. Off by default; the explicit fallback. */
   materialize?: boolean
+  /** Set the runtime default agent. Off by default; the user's config owns it. */
+  setDefault?: boolean
   /** Filesystem adapter for materialization (defaults to `node:fs`). */
   fs?: MaterializeFs
 }
@@ -618,6 +620,9 @@ function resolveModel(
 
 /** Copy a definition onto the mutable object the runtime exposes. */
 function applyDefinition(agent: MutableAgentConfig, definition: AgentDefinition): void {
+  // OpenCode 2.2's Agent.Info requires a non-empty `name`; the id is the
+  // stable machine name and the description carries the human-facing text.
+  agent.name = definition.id
   agent.description = definition.description
   agent.mode = definition.mode
   agent.system = definition.system
@@ -660,10 +665,10 @@ export async function registerAgents(
     ? DEFAULT_AGENT_ID
     : (resolved[0]?.id ?? DEFAULT_AGENT_ID)
 
-  // (1) Optional runtime registration. Off by default: the transform is the
-  // path that reshapes the runtime's config reads on 2.1.3. The callback is
-  // synchronous; a returned promise is awaited.
-  const useTransform = options.transform === true
+  // (1) Runtime registration. This is the default path on OpenCode 2.2+:
+  // `agent.transform` creates the roster in memory, so no files are written to
+  // the user's global config.
+  const useTransform = options.transform !== false
   if (useTransform) {
     try {
       const agent = ctx?.agent
@@ -683,9 +688,9 @@ export async function registerAgents(
             )
           }
         }
-        if (resolved.length > 0) {
+        if (options.setDefault === true && resolved.length > 0) {
           try {
-            editor.default(defaultAgent)
+            if (typeof editor.default === 'function') editor.default(defaultAgent)
           } catch (error) {
             warnings.push(`default agent ${defaultAgent} not set: ${describeError(error)}`)
           }
@@ -696,9 +701,10 @@ export async function registerAgents(
     }
   }
 
-  // (2) The registration path. Always on unless explicitly disabled.
+  // (2) Explicit file fallback. Off by default: the global config belongs to
+  // the user, and duplicate agent files are what this migration removes.
   const env = options.env ?? process.env
-  const enabled = options.materialize !== false && env[NO_MATERIALIZE_ENV] !== '1'
+  const enabled = options.materialize === true && env[NO_MATERIALIZE_ENV] !== '1'
   let materializedRoster = false
 
   if (enabled) {
@@ -731,5 +737,8 @@ export async function registerAgents(
     }
   }
 
-  return { registered, defaultAgent, materialized, warnings }
+  const registration: RegisterAgentsResult['registration'] =
+    useTransform && registered.length > 0 ? 'transform' : materializedRoster ? 'files' : 'none'
+
+  return { registered, defaultAgent, materialized, registration, warnings }
 }

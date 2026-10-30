@@ -1,4 +1,10 @@
 node_modules/
 bun.lock
 bun.lockb
-dist/
+# The GUI part is a prebuilt CommonJS bundle shipped with the package. It must
+# be committed for `opencode plugin add github:...#tag` installs, which clone
+# the repository without running a build. The CLI build output stays ignored.
+dist/*
+!dist/gui-experimental.cjs
+
+.DS_Store

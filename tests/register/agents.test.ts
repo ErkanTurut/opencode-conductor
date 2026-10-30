@@ -387,7 +387,7 @@ const fleet = loadFleetConfig(ASSETS_DIR)
 const roster = loadAgentDefinitions(ASSETS_DIR, fleet)
 
 describe('registerAgents', () => {
-  it('materialises the roster as files and never touches the runtime transform by default', async () => {
+  it('registers the roster through the runtime transform by default and writes no files', async () => {
     const stub = stubContext()
     const dir = tempDir()
     const result = await registerAgents(stub.ctx, roster, {
@@ -397,26 +397,27 @@ describe('registerAgents', () => {
       fleet,
     })
 
-    // Files are the registration path: every id is available, and "registered"
-    // reports that roster even though no transform ran.
+    // The transform is the registration path: every id is available in memory,
+    // and nothing is written into the user's global config.
     expect(result.registered).toHaveLength(15)
     expect(new Set(result.registered).size).toBe(15)
     expect(result.registered).toEqual(roster.map((definition) => definition.id))
-    expect(result.materialized).toHaveLength(15)
+    expect(result.materialized).toEqual([])
+    expect(result.registration).toBe('transform')
     expect(result.defaultAgent).toBe('conductor')
     expect(result.warnings).toEqual([])
+    expect(stub.ids).toHaveLength(15)
+    expect(stub.agents.coder.name).toBe('coder')
 
     for (const definition of roster) {
-      expect(nodeFs.existsSync(join(dir, 'agents', `${definition.id}.md`))).toBe(true)
+      expect(nodeFs.existsSync(join(dir, 'agents', `${definition.id}.md`))).toBe(false)
     }
 
-    // No transform, and in particular no `editor.default`: the default agent
-    // comes from the user's config, not from a runtime call.
-    expect(stub.ids).toEqual([])
+    // `editor.default` is opt-in: the user's config owns the default agent.
     expect(stub.defaultId).toBe('')
   })
 
-  it('registers through transform when asked, and defaults conductor', async () => {
+  it('sets conductor as the runtime default only when asked', async () => {
     const stub = stubContext()
     const result = await registerAgents(stub.ctx, roster, {
       configDir: tempDir(),
@@ -424,6 +425,7 @@ describe('registerAgents', () => {
       fs: io,
       fleet,
       transform: true,
+      setDefault: true,
     })
 
     expect(result.registered).toHaveLength(15)
@@ -448,7 +450,7 @@ describe('registerAgents', () => {
     )).toBe(false)
   })
 
-  it('materialises the same roster as files exactly once', async () => {
+  it('materialises the same roster as files exactly once when the fallback is enabled', async () => {
     const stub = stubContext()
     const dir = tempDir()
 
@@ -457,9 +459,12 @@ describe('registerAgents', () => {
       env: {},
       fs: io,
       fleet,
+      transform: false,
+      materialize: true,
     })
     expect(first.materialized).toHaveLength(15)
     expect(first.registered).toHaveLength(15)
+    expect(first.registration).toBe('files')
     for (const definition of roster) {
       expect(nodeFs.existsSync(join(dir, 'agents', `${definition.id}.md`))).toBe(true)
     }
@@ -478,6 +483,8 @@ describe('registerAgents', () => {
       env: {},
       fs: io,
       fleet,
+      transform: false,
+      materialize: true,
     })
     expect(second.materialized).toEqual([])
     expect(second.registered).toHaveLength(15)
@@ -490,11 +497,14 @@ describe('registerAgents', () => {
       env: { CONDUCTOR_NO_MATERIALIZE: '1' },
       fs: io,
       fleet,
+      transform: false,
+      materialize: true,
     })
 
     // Nothing is registered by any path: no transform, and the write is off.
     expect(result.registered).toEqual([])
     expect(result.materialized).toEqual([])
+    expect(result.registration).toBe('none')
   })
 
   it('falls back to the fleet default for an unknown model, with a warning', async () => {
@@ -539,6 +549,8 @@ describe('registerAgents', () => {
       env: {},
       fs: io,
       fleet,
+      transform: false,
+      materialize: true,
     })
 
     expect(result.warnings).toEqual([])
@@ -550,8 +562,9 @@ describe('registerAgents', () => {
     expect(written).toContain('model: "opencode-go/unlisted-model"')
   })
 
-  it('needs no agent.transform on the default path', async () => {
-    const result = await registerAgents(null, roster, {
+  it('defaults to transform registration and needs no filesystem', async () => {
+    const stub = stubContext()
+    const result = await registerAgents(stub.ctx, roster, {
       configDir: tempDir(),
       env: {},
       fs: io,
@@ -559,7 +572,8 @@ describe('registerAgents', () => {
     })
 
     expect(result.registered).toHaveLength(15)
-    expect(result.materialized).toHaveLength(15)
+    expect(result.materialized).toEqual([])
+    expect(result.registration).toBe('transform')
     expect(result.warnings).toEqual([])
   })
 
@@ -573,12 +587,13 @@ describe('registerAgents', () => {
     })
 
     expect(result.registered).toEqual([])
-    expect(result.materialized).toHaveLength(15)
+    expect(result.materialized).toEqual([])
+    expect(result.registration).toBe('none')
     expect(result.warnings).toHaveLength(1)
     expect(result.warnings[0]).toContain('agent.transform')
   })
 
-  it('reports a failing transform and still writes the files', async () => {
+  it('reports a failing transform and still writes the files when the fallback is enabled', async () => {
     const failing: AgentRegistrationContext = {
       agent: {
         transform() {
@@ -593,10 +608,12 @@ describe('registerAgents', () => {
       fs: io,
       fleet,
       transform: true,
+      materialize: true,
     })
 
     expect(result.registered).toEqual([])
     expect(result.materialized).toHaveLength(15)
+    expect(result.registration).toBe('files')
     expect(result.warnings).toHaveLength(1)
     expect(result.warnings[0]).toContain('runtime refused the transform')
   })

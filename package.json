@@ -1,23 +1,32 @@
 {
   "name": "opencode-conductor",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": false,
   "type": "module",
   "main": "./index.ts",
   "exports": {
-    ".": "./index.ts"
+    ".": "./index.ts",
+    "./rpc": "./src/rpc-contract.ts",
+    "./gui-experimental": "./dist/gui-experimental.cjs"
   },
   "types": "./index.ts",
   "files": [
     "index.ts",
     "src",
+    "assets",
+    "dist/gui-experimental.cjs",
     "config",
     "schemas",
     "profiles",
-    "README.md"
+    "docs",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
   ],
   "scripts": {
-    "build": "bun build src/cli.ts --outdir dist --target bun",
+    "build": "bun build src/cli.ts --outdir dist --target bun && vite build",
+    "gui:build": "vite build",
+    "gui:watch": "vite build --watch",
     "typecheck": "bun run scripts/typecheck-baseline.ts",
     "typecheck:raw": "tsc --noEmit",
     "test": "bun test",
@@ -27,9 +36,13 @@
     "fleet-ui": "bun run src/fleet-ui/server.ts"
   },
   "dependencies": {
-    "@opencode-ai/plugin": "1.18.15"
+    "@opencode/plugin": "2.2.4"
   },
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "solid-js": "^1.9.0",
+    "typescript": "^5.8.2",
+    "vite": "^7.0.0",
+    "vite-plugin-solid": "^2.11.0"
   }
 }

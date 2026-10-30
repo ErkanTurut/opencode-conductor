@@ -14,7 +14,7 @@ runtime; nothing is copied into your global `agents/` or `skills/` directories.
 ## Install
 
 ```sh
-opencode plugin add github:ErkanTurut/opencode-conductor#v1.0.0
+opencode plugin add github:ErkanTurut/opencode-conductor#v1.0.1
 ```
 
 Then restart OpenCode. The plugin is global: it loads in every project.

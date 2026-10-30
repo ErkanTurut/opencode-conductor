@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.1 — 2026-10-30
+
+### Fixed
+
+- Added the **Conductor** launcher to the Desktop session side panel's **+** / **New tab**
+  menu. Registering a `Panel` alone does not create a launcher; the new `MenuItem` makes the
+  panel discoverable. The command palette entry (`conductor.open`) remains available.
+- Updated the install and GUI docs to use the **+** → **Conductor** path.
+
+Install: `opencode plugin add github:ErkanTurut/opencode-conductor#v1.0.1`
+
 ## 1.0.0 — 2026-10-30
 
 ### Added

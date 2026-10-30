@@ -34,7 +34,7 @@ opencode --version   # 2.2.4 or newer 2.2.x
 ## 3. Install the plugin
 
 ```sh
-opencode plugin add github:ErkanTurut/opencode-conductor#v1.0.0
+opencode plugin add github:ErkanTurut/opencode-conductor#v1.0.1
 ```
 
 `opencode plugin add` writes the package to the global `~/.config/opencode/opencode.json(c)`
@@ -112,7 +112,7 @@ The mutating tools return `untrusted_project` until the grant exists.
 ```sh
 opencode --version
 opencode debug agents          # conductor + the 14 roster agents
-opencode plugin list           # conductor, version 1.0.0
+opencode plugin list           # conductor, version 1.0.1
 ```
 
 In a session:
@@ -137,7 +137,7 @@ In a session:
 
 ## Rollback
 
-1. `opencode plugin remove opencode-conductor@1.0.0`.
+1. `opencode plugin remove opencode-conductor@1.0.1`.
 2. Restore the backup directories into `~/.config/opencode/`.
 3. Restore the project shim and `.opencode/opencode.jsonc` from git.
 4. Restart OpenCode.

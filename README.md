@@ -41,8 +41,9 @@ so the plugin must be in your global `~/.config/opencode/opencode.json(c)` `plug
    ```
 
 2. Open a session in the project. The `conductor` agent and the roster are available.
-3. Open the **Conductor** panel from the session side region (or run the `conductor.open`
-   command). The panel follows the current session's project directory.
+3. Open the **Conductor** panel: click **+** in the session side region and choose
+   **Conductor**, or run the **Open Conductor panel** command. The panel follows the current
+   session's project directory.
 
 ## What you get
 

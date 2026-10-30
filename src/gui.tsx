@@ -1,4 +1,4 @@
-import { Command, Panel, Plugin, Style, type PanelTab } from '@opencode/plugin/gui'
+import { Command, MenuItem, Panel, Plugin, Style, type PanelTab } from '@opencode/plugin/gui'
 import { CONDUCTOR_TABS, ConductorPanel } from './gui/panel'
 import { PANEL_CSS } from './gui/styles'
 
@@ -182,6 +182,27 @@ export default Plugin.define({
           if (session) ctx.layout.toggle(`${ctx.id}:runs`, session)
         },
       }),
+    )
+
+    ctx.add(
+      MenuItem,
+      (): MenuItem => {
+        const session = ctx.sessions.current()
+        return {
+          menu: 'session.panel',
+          id: 'open',
+          title: ctx.t('panel.title'),
+          description: ctx.t('command.description'),
+          icon: 'terminal',
+          order: 35,
+          keybind: `${ctx.id}.open`,
+          opened:
+            !!session && ctx.layout.state(`${ctx.id}:runs`, session) !== 'closed',
+          run: () => {
+            if (session) ctx.layout.open(`${ctx.id}:runs`, session)
+          },
+        }
+      },
     )
 
     ctx.add(Style, PANEL_CSS)

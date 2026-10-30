@@ -14,7 +14,7 @@ OpenCode Desktop GUI contribution (`./gui-experimental`), not a web dashboard.
 
 ## Open the panel
 
-- Session side region → **Conductor** tab, or
+- Session side region → **+** → **Conductor**, or
 - Command palette → **Open Conductor panel** (`conductor.open`).
 
 The panel follows the current session's project directory. Open it in a session in the

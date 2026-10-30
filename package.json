@@ -19,6 +19,9 @@
     "schemas",
     "profiles",
     "docs",
+    "scripts",
+    "AGENTS.md",
+    "CONTRIBUTING.md",
     "README.md",
     "CHANGELOG.md",
     "LICENSE"
@@ -27,6 +30,7 @@
     "build": "bun build src/cli.ts --outdir dist --target bun && vite build",
     "gui:build": "vite build",
     "gui:watch": "vite build --watch",
+    "smoke:gui": "node scripts/gui-smoke.cjs",
     "typecheck": "bun run scripts/typecheck-baseline.ts",
     "typecheck:raw": "tsc --noEmit",
     "test": "bun test",

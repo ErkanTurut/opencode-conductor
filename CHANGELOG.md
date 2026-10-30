@@ -12,6 +12,13 @@
   when the project had an active run.
 - Updated the install and GUI docs to use the **+** → **Conductor** path.
 
+### Documentation
+
+- Added `AGENTS.md` (fresh-session operating guide and prompt), `CONTRIBUTING.md`,
+  `docs/ARCHITECTURE.md`, `docs/GUI-ITERATION.md`, and `docs/RPC.md`.
+- Added `scripts/gui-smoke.cjs` and `bun run smoke:gui` to load the built bundle with a fake
+  host and verify `Panel`, `Command`, `MenuItem`, `Style`, and the six tab ids.
+
 Install: `opencode plugin add github:ErkanTurut/opencode-conductor#v1.0.1`
 
 ## 1.0.0 — 2026-10-30

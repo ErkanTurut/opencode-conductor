@@ -146,8 +146,10 @@ everything. Full steps are in [docs/MIGRATION.md](docs/MIGRATION.md).
 ```sh
 bun install
 bun test                  # 855 tests
-bun run typecheck         # baseline-gated tsc
+bun run typecheck         # baseline-gated server typecheck
+bunx tsc -p tsconfig.gui.json --noEmit
 bun run gui:build         # dist/gui-experimental.cjs
+bun run smoke:gui         # load the bundle with a fake host
 bun run build             # CLI + GUI
 ```
 
@@ -155,6 +157,19 @@ The GUI bundle is committed (`dist/gui-experimental.cjs`) because a GitHub insta
 repository without running a build. Local plugin development: keep the package under
 `~/.config/opencode/plugins/opencode-conductor` (auto-discovered) or add its absolute path to
 the global `plugins` list.
+
+### Documentation
+
+| File | Purpose |
+| --- | --- |
+| [AGENTS.md](AGENTS.md) | AI-agent operating guide and fresh-session prompt |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Contributor setup, PR checklist, release |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Server/RPC/GUI/state design and file map |
+| [docs/GUI-ITERATION.md](docs/GUI-ITERATION.md) | How to change the panel safely, including live-run rules |
+| [docs/RPC.md](docs/RPC.md) | Contract, methods, location scoping, adding a method |
+| [docs/GUI.md](docs/GUI.md) | What each panel tab shows |
+| [docs/MIGRATION.md](docs/MIGRATION.md) | 2.1.x → 2.2.x migration |
+
 
 ## License
 

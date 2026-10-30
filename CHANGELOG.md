@@ -7,6 +7,9 @@
 - Added the **Conductor** launcher to the Desktop session side panel's **+** / **New tab**
   menu. Registering a `Panel` alone does not create a launcher; the new `MenuItem` makes the
   panel discoverable. The command palette entry (`conductor.open`) remains available.
+- Pass the current session directory with every Conductor RPC call. The Desktop app's server
+  otherwise answers from its global location, which made the panel show **No runs yet** even
+  when the project had an active run.
 - Updated the install and GUI docs to use the **+** → **Conductor** path.
 
 Install: `opencode plugin add github:ErkanTurut/opencode-conductor#v1.0.1`

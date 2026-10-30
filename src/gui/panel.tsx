@@ -78,6 +78,10 @@ export function ConductorPanel(props: PanelProps) {
   let refreshing = false
 
   const rpc = () => ctx.client.rpc(ConductorRpc)
+  // RPC registrations are per location. The Desktop panel is mounted for a
+  // session, so every call must name that session's directory; without this
+  // the server answers from the app's global location and the panel looks empty.
+  const location = () => ({ directory: props.session.directory })
 
   async function call<T>(operation: () => Promise<unknown>): Promise<Loaded<T>> {
     try {
@@ -90,12 +94,14 @@ export function ConductorPanel(props: PanelProps) {
   async function loadRun(runId: string) {
     setDetailLoading(true)
     const [detail, dagData, gateData, refinementData, routingData, timelineData] = await Promise.all([
-      call<RunDetailData>(() => rpc().run({ runId })),
-      call<DagData>(() => rpc().dag({ runId })),
-      call<GatesData>(() => rpc().gates({ runId })),
-      call<RefinementData>(() => rpc().refinements({ runId })),
-      call<RoutingData>(() => rpc().routing({ runId })),
-      call<TimelineData>(() => rpc().timeline({ runId, limit: TIMELINE_LIMIT })),
+      call<RunDetailData>(() => rpc().run({ runId }, { location: location() })),
+      call<DagData>(() => rpc().dag({ runId }, { location: location() })),
+      call<GatesData>(() => rpc().gates({ runId }, { location: location() })),
+      call<RefinementData>(() => rpc().refinements({ runId }, { location: location() })),
+      call<RoutingData>(() => rpc().routing({ runId }, { location: location() })),
+      call<TimelineData>(() =>
+        rpc().timeline({ runId, limit: TIMELINE_LIMIT }, { location: location() }),
+      ),
     ])
     if (disposed || selectedRunId() !== runId) return
 
@@ -114,7 +120,9 @@ export function ConductorPanel(props: PanelProps) {
   }
 
   async function loadRuns() {
-    const result = await call<RunsData>(() => rpc().runs({ limit: RUN_LIMIT }))
+    const result = await call<RunsData>(() =>
+      rpc().runs({ limit: RUN_LIMIT }, { location: location() }),
+    )
     if (disposed) return
     setRunsLoading(false)
     if (result.error) {
@@ -133,7 +141,9 @@ export function ConductorPanel(props: PanelProps) {
   }
 
   async function loadMemory() {
-    const result = await call<MemoryData>(() => rpc().memory({ limit: MEMORY_LIMIT }))
+    const result = await call<MemoryData>(() =>
+      rpc().memory({ limit: MEMORY_LIMIT }, { location: location() }),
+    )
     if (disposed) return
     setMemoryLoading(false)
     if (result.data) setMemory(result.data)
@@ -152,7 +162,9 @@ export function ConductorPanel(props: PanelProps) {
 
   async function loadMemoryBlock(label: string, version: number): Promise<MemoryBlockData | null> {
     if (label.length === 0) return null
-    const result = await call<unknown>(() => rpc().memoryBlock({ label, version }))
+    const result = await call<unknown>(() =>
+      rpc().memoryBlock({ label, version }, { location: location() }),
+    )
     if (result.error) {
       setError(result.error)
       return null

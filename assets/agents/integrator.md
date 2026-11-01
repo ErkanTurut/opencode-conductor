@@ -57,7 +57,8 @@ Load only the skills relevant to the current task using `skill({ name: "skill-id
 2. Resolve conflicts only when covered by the plan and do not change unrelated behavior.
 3. Run the full verification profile: format, lint, test, build.
 4. If verification fails, identify and isolate the offending task.
-5. Produce integration evidence for the conductor's finalize step (human-approved merge into `develop`, push, PR).
+5. Inspect project configuration and documented deployment workflow for the development branch, preview provider, deployment status and URL. Distinguish discovered configuration from a verified live deployment. Report how the conductor can verify the pushed commit, or propose setup if no preview exists; never expose credentials.
+6. Produce integration evidence for the conductor's human-approved merge, push, preview verification and PR workflow.
 
 ## Rules
 

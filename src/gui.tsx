@@ -1,6 +1,7 @@
 import { Command, MenuItem, Panel, Plugin, Style, type PanelTab } from '@opencode/plugin/gui'
 import { CONDUCTOR_TABS, ConductorPanel } from './gui/panel'
-import { PANEL_CSS } from './gui/styles'
+import { PANEL_CSS, RUNS_CSS } from './gui/styles'
+import { INSPECTOR_CSS } from './gui/inspector-styles'
 
 const TITLES: Readonly<Record<(typeof CONDUCTOR_TABS)[number], string>> = {
   runs: 'tab.runs',
@@ -9,6 +10,8 @@ const TITLES: Readonly<Record<(typeof CONDUCTOR_TABS)[number], string>> = {
   refinements: 'tab.refinements',
   memory: 'tab.memory',
   routing: 'tab.routing',
+  agents: 'tab.agents',
+  project: 'tab.project',
 }
 
 /**
@@ -32,6 +35,9 @@ export default Plugin.define({
       'tab.refinements': 'Refinements',
       'tab.memory': 'Memory',
       'tab.routing': 'Routing',
+      'tab.agents': 'Agents',
+      'tab.project': 'Project',
+      'navigation.backRuns': 'Back to runs',
 
       'common.loading': 'Loading\u2026',
       'common.unknown': 'unknown',
@@ -137,7 +143,7 @@ export default Plugin.define({
       'routing.coverageValue': '{{withUsage}}/{{attempts}} attempts',
       'routing.usageUnavailable': 'usage unavailable',
       'routing.timeline': 'Event timeline',
-      'routing.truncated': 'older events hidden',
+      'routing.truncated': 'More events available. Loading the next page on refresh.',
       'routing.noEvents': 'No events recorded.',
     },
   },
@@ -205,6 +211,6 @@ export default Plugin.define({
       },
     )
 
-    ctx.add(Style, PANEL_CSS)
+    ctx.add(Style, PANEL_CSS + RUNS_CSS + INSPECTOR_CSS)
   },
 })

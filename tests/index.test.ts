@@ -126,6 +126,21 @@ describe('resolveSupervisorConfig — option resolution order', () => {
     expect(overridden.allowedCommands).toEqual(['bun test'])
     expect(overridden.harness).toBe('opencode-session-v2')
     expect(overridden.namespace).toBe(true)
+
+    const detected = resolveSupervisorConfig({
+      env: {},
+      detectedBranches: { dev: 'integration', main: 'stable' },
+      detectedVerifyProfile: ['bun test', 'bun run build'],
+    })
+    expect(detected.branches).toEqual({ dev: 'integration', main: 'stable' })
+    expect(detected.verifyProfile).toEqual(['bun test', 'bun run build'])
+    const environmentOverridesDetection = resolveSupervisorConfig({
+      env: { SUPERVISOR_BRANCHES: 'env-dev,env-main', SUPERVISOR_VERIFY_PROFILE: 'bun run lint' },
+      detectedBranches: { dev: 'integration', main: 'stable' },
+      detectedVerifyProfile: ['bun test'],
+    })
+    expect(environmentOverridesDetection.branches).toEqual({ dev: 'env-dev', main: 'env-main' })
+    expect(environmentOverridesDetection.verifyProfile).toEqual(['bun run lint'])
   })
 
   it('defaults namespace to false so flat supervisor_* names keep working', () => {

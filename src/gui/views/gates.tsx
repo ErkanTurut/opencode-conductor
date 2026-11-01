@@ -29,8 +29,8 @@ export function GatesView(props: GatesViewProps) {
       aside={
         <Show when={props.data}>
           <Badge
-            tone={props.data?.mergeReady ? 'completed' : 'blocked'}
-            label={props.data?.mergeReady ? ctx.t('gates.mergeReady') : ctx.t('gates.mergeBlocked')}
+            tone={props.data?.readiness ? (props.data.readiness.evidenceReady ? 'completed' : 'blocked') : 'unknown'}
+            label={props.data?.readiness ? (props.data.readiness.evidenceReady ? 'Evidence ready' : 'Evidence incomplete') : 'Evidence readiness unknown'}
           />
         </Show>
       }
@@ -43,6 +43,12 @@ export function GatesView(props: GatesViewProps) {
           when={props.data}
           fallback={props.loading ? <LoadingBlock label={ctx.t('common.loading')} /> : null}
         >
+          <div class="cdt-inspector-note">
+            <strong>Not merge authorization.</strong> Recorded evidence does not authorize a push or merge.
+            <Show when={props.data?.readiness} fallback={<p>Evidence readiness is unavailable for this server.</p>}>
+              {(readiness) => <Show when={arrayOf<string>(readiness().reasons).length > 0}><ul><For each={arrayOf<string>(readiness().reasons)}>{reason => <li>{reason}</li>}</For></ul></Show>}
+            </Show>
+          </div>
           <Show
             when={approvals().length > 0 || tasks().length > 0}
             fallback={<EmptyState title={ctx.t('gates.empty.title')} body={ctx.t('gates.empty.body')} />}

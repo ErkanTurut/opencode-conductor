@@ -452,6 +452,7 @@ describe('setupConductor wiring', () => {
         async transform(callback: (editor: any) => void) {
           transformCalls.push('agent')
           callback({
+            get() { return undefined },
             update(id: string, apply: (agent: Record<string, unknown>) => void) {
               const agent: Record<string, unknown> = {}
               apply(agent)

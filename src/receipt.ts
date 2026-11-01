@@ -200,7 +200,7 @@ export async function writeReceiptToDisk(
   path: string,
 ): Promise<void> {
   const markdown = formatReceiptAsMarkdown(receipt)
-  await Bun.write(path, markdown)
+  safeWriteArtifact(path, markdown)
 }
 
 function formatReceiptAsMarkdown(receipt: ReceiptData): string {
@@ -278,3 +278,4 @@ function formatReceiptAsMarkdown(receipt: ReceiptData): string {
 
   return lines.join('\n')
 }
+import { safeWriteArtifact } from './runtime/safe-write'

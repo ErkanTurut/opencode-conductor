@@ -1,4 +1,4 @@
-import { For, Show, createSignal } from 'solid-js'
+import { For, Show, createEffect, createSignal, onCleanup } from 'solid-js'
 import { usePlugin } from '@opencode/plugin/gui'
 import type { MemoryBlockData, MemoryBlockSummary, MemoryData } from '../../rpc-contract'
 import { arrayOf, textOf } from '../data'
@@ -9,6 +9,13 @@ export interface MemoryViewProps {
   data: MemoryData | null
   loading: boolean
   loadBlock: (label: string, version: number) => Promise<MemoryBlockData | null>
+  /** Project identity; change it whenever the session directory changes. */
+  scopeKey?: string
+}
+
+/** A late expansion result must never cross a project or component lifetime. */
+export function memoryRequestIsCurrent(disposed: boolean, generation: number, requestGeneration: number, scope: string | undefined, requestScope: string | undefined): boolean {
+  return !disposed && generation === requestGeneration && scope === requestScope
 }
 
 function blockKey(block: MemoryBlockSummary): string {
@@ -20,7 +27,18 @@ export function MemoryView(props: MemoryViewProps) {
   const ctx = usePlugin()
   const [expanded, setExpanded] = createSignal<string | null>(null)
   const [contents, setContents] = createSignal<Record<string, MemoryBlockData | null>>({})
-  const [pending, setPending] = createSignal<string | null>(null)
+  const [pending, setPending] = createSignal<Record<string, boolean>>({})
+  let generation = 0
+  let disposed = false
+  let cacheScope = props.scopeKey
+  createEffect(() => {
+    cacheScope = props.scopeKey
+    generation++
+    setExpanded(null)
+    setContents({})
+    setPending({})
+  })
+  onCleanup(() => { disposed = true; generation++ })
 
   const blocks = () => arrayOf<MemoryBlockSummary>(props.data?.blocks)
 
@@ -31,11 +49,15 @@ export function MemoryView(props: MemoryViewProps) {
       return
     }
     setExpanded(key)
-    if (Object.prototype.hasOwnProperty.call(contents(), key)) return
-    setPending(key)
-    const loaded = await props.loadBlock(textOf(block.label, ''), block.version)
-    setPending((current) => (current === key ? null : current))
-    setContents((current) => ({ ...current, [key]: loaded }))
+    if (Object.prototype.hasOwnProperty.call(contents(), key) || pending()[key]) return
+    const requestGeneration = generation
+    const requestScope = props.scopeKey
+    setPending(current => ({ ...current, [key]: true }))
+    let loaded: MemoryBlockData | null = null
+    try { loaded = await props.loadBlock(textOf(block.label, ''), block.version) } catch { /* shown as unavailable */ }
+    if (!memoryRequestIsCurrent(disposed, generation, requestGeneration, props.scopeKey, requestScope)) return
+    setPending(current => ({ ...current, [key]: false }))
+    setContents(current => ({ ...current, [key]: loaded }))
   }
 
   return (
@@ -62,7 +84,7 @@ export function MemoryView(props: MemoryViewProps) {
             {(block, index) => {
               const key = () => blockKey(block)
               const contentId = () => `cdt-memory-content-${index()}`
-              const loaded = () => contents()[key()]
+              const loaded = () => props.scopeKey === cacheScope ? contents()[key()] : null
               return (
                 <li>
                   <button
@@ -99,6 +121,13 @@ export function MemoryView(props: MemoryViewProps) {
                           : ctx.t('memory.noReview')}
                       </span>
                     </span>
+                    <span class="cdt-row cdt-wrap cdt-meta">
+                      <span>Review: {block.review?.classification === 'unreviewed' ? 'unreviewed (pending promotion)' : textOf(block.review?.classification, 'unknown')}</span>
+                      <span aria-hidden="true">&middot;</span>
+                      <span>Eligible: {typeof block.review?.eligible === 'boolean' ? (block.review.eligible ? 'yes' : 'no') : 'unknown'}</span>
+                    </span>
+                    <span class="cdt-meta cdt-muted">Source run: {textOf(block.sourceRunId, 'unknown')}</span>
+                    <Show when={arrayOf<string>(block.review?.reasons).length}><span class="cdt-meta cdt-muted">Review reasons: {arrayOf<string>(block.review?.reasons).join(', ')}</span></Show>
                     <Show when={block.contentPreview}>
                       <span class="cdt-memory-preview">{truncate(block.contentPreview, 160)}</span>
                     </Show>
@@ -107,10 +136,10 @@ export function MemoryView(props: MemoryViewProps) {
                     </span>
                   </button>
 
-                  <Show when={expanded() === key()}>
+                  <Show when={props.scopeKey === cacheScope && expanded() === key()}>
                     <div class="cdt-memory-content" id={contentId()}>
                       <Show
-                        when={pending() !== key()}
+                        when={!pending()[key()]}
                         fallback={<p class="cdt-muted cdt-meta">{ctx.t('memory.loading')}</p>}
                       >
                         <Show
@@ -118,9 +147,19 @@ export function MemoryView(props: MemoryViewProps) {
                           fallback={<p class="cdt-muted cdt-meta">{ctx.t('memory.contentUnavailable')}</p>}
                         >
                           {(blockData) => (
-                            <pre class="cdt-pre" tabindex="0" aria-label={blockData().label}>
-                              {blockData().content}
-                            </pre>
+                            <>
+                              <div class="cdt-inspector-review">
+                                <p><strong>Review classification:</strong> {blockData().review?.classification === 'unreviewed' ? 'unreviewed (pending promotion)' : textOf(blockData().review?.classification ?? block.review?.classification, 'unknown')}</p>
+                                <p><strong>Eligibility:</strong> {typeof (blockData().review ?? block.review)?.eligible === 'boolean' ? ((blockData().review ?? block.review)?.eligible ? 'eligible' : 'not eligible') : 'unknown'}</p>
+                                <p><strong>Suggested action:</strong> {(blockData().review ?? block.review)?.action === 'propose_review' ? 'propose review' : textOf((blockData().review ?? block.review)?.action, 'unknown')}</p>
+                                <Show when={arrayOf<string>((blockData().review ?? block.review)?.reasons).length}><p><strong>Reasons:</strong> {arrayOf<string>((blockData().review ?? block.review)?.reasons).join(', ')}</p></Show>
+                                <p><strong>Source run:</strong> {textOf(blockData().sourceRunId, 'unknown')}</p>
+                                <p><strong>Source artifacts:</strong> {arrayOf<string>(blockData().sourceArtifacts).join(', ') || 'unknown'}</p>
+                                <p><strong>Actor:</strong> {textOf(blockData().actor, 'unknown')} · <strong>Content hash:</strong> {textOf(blockData().contentHash, 'unknown')}</p>
+                                <Show when={blockData().supersedes}><p><strong>Supersedes:</strong> {blockData().supersedes}</p></Show>
+                              </div>
+                              <pre class="cdt-pre" tabindex="0" aria-label={blockData().label}>{blockData().content}</pre>
+                            </>
                           )}
                         </Show>
                       </Show>

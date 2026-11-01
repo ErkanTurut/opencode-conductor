@@ -18,9 +18,21 @@ const STATE_TONES: Readonly<Record<string, StateTone>> = {
   pending: 'pending',
   queued: 'pending',
   planned: 'pending',
+  created: 'pending',
+  discovered: 'pending',
   todo: 'pending',
+  intake: 'ready',
+  awaiting_refinement: 'blocked',
+  awaiting_plan_approval: 'blocked',
+  awaiting_merge_approval: 'blocked',
+  paused: 'blocked',
   ready: 'ready',
   running: 'running',
+  executing: 'running',
+  validating: 'running',
+  reviewing: 'running',
+  repairing: 'running',
+  integrating: 'running',
   in_progress: 'running',
   inprogress: 'running',
   leased: 'running',
@@ -179,4 +191,3 @@ export function taskProgress(
   const percent = total > 0 ? Math.min(100, Math.round((completed / total) * 100)) : 0
   return { completed, total, percent }
 }
-

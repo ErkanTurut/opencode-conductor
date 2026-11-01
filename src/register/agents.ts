@@ -1,26 +1,7 @@
-// Agent roster registration for the global plugin entry.
-//
-// Two things are true at once, and this module is built around the pair:
-//
-//   1. A plugin *can* create an agent by calling `editor.update(id, mutate)`
-//      with an id that does not exist yet. That is observed behaviour of the
-//      runtime, not a documented API (see `runtime/compat.ts`'s probe and
-//      `tests/probes/agent-transform-probe.ts`). On OpenCode 2.1.3 it is not
-//      used by default: the transform reshapes config reads (commands fail
-//      `Command.list` schema validation) and keeps re-writing the watched
-//      config directory. It stays available behind `transform: true` for
-//      tests and experiments.
-//   2. A V2 agent file in the user's global `opencode/agents/` directory is
-//      the documented, restart-proof way to define an agent. Files are the
-//      registration path, and `materializeAgentFiles` skips unchanged files so
-//      a run costs no writes.
-//
-// Nothing here throws — a failure is a warning, because an agent roster is an
-// enhancement and must never take the supervisor's tools down with it.
-//
-// The roster itself lives in `assets/agents/*.md` (verbatim copies of the
-// project's agent definitions) and the role→model mapping lives in
-// `assets/fleet.json`, so a model change is a one-line edit in one file.
+// Register packaged Markdown defaults in memory through OpenCode V2 transforms.
+// Existing native agents are authoritative. Fleet catalogs never select models
+// here; native Markdown/JSONC owns configuration. Materialization is an explicit
+// compatibility fallback only. Failures warn without disabling supervisor tools.
 //
 // Import note: imports are extensionless because the package's `tsc --noEmit`
 // baseline rejects `.ts`-suffixed specifiers (TS5097).
@@ -114,6 +95,7 @@ export interface MutableAgentConfig {
 export interface AgentEditor {
   update(id: string, apply: (agent: MutableAgentConfig) => void): void
   default(id: string): void
+  get?(id: string): MutableAgentConfig | undefined
 }
 
 /** The part of `ctx` agent registration needs. Everything is optional. */
@@ -128,7 +110,7 @@ export interface RegisterAgentsOptions {
   env?: Record<string, string | undefined>
   /** Global config dir; defaults to `XDG_CONFIG_HOME/opencode` or `~/.config/opencode`. */
   configDir?: string | null
-  /** The fleet whose models/fallback decide the unknown-model policy. */
+  /** @deprecated Migration compatibility only; never selects agent models. */
   fleet?: FleetConfig | null
   /**
    * Register through `ctx.agent.transform`. On by default for OpenCode 2.2+.
@@ -239,6 +221,7 @@ export function parseModelRef(
   const base = hash === -1 ? raw : raw.slice(0, hash)
   const inlineVariant = hash === -1 ? undefined : raw.slice(hash + 1)
 
+  if ((hash !== -1 && (!inlineVariant || inlineVariant.includes('#'))) || /\s/.test(raw)) return undefined
   const slash = base.indexOf('/')
   if (slash <= 0 || slash === base.length - 1) return undefined
 
@@ -287,12 +270,6 @@ export const ENV_READ_DENY: Readonly<PermissionRule> = {
   effect: 'deny',
 }
 
-const EFFECT_ORDER: Readonly<Record<PermissionEffect, number>> = {
-  deny: 0,
-  ask: 1,
-  allow: 2,
-}
-
 /**
  * Normalise an effect value. An unrecognised value becomes `ask`, never
  * `allow`: a typo in a permission file must not silently grant a capability.
@@ -313,11 +290,9 @@ function mapPermissionAction(source: string): string | null {
 /**
  * Map a frontmatter `permission` block into runtime rules.
  *
- * Within one action the runtime evaluates the first match, so the order
- * matters: `deny` before `ask` before `allow`, preserving the file's order
- * inside each effect group. That makes the narrow denial (`git push*: deny`)
- * win over the broad allowance (`*: allow`) regardless of how the block was
- * written.
+ * OpenCode V2 evaluates the last matching rule. Preserve source order, with
+ * broad defaults before exceptions, rather than sorting by effect (which
+ * would put a broad allowance after the denials and accidentally permit it).
  */
 export function mapPermissionBlock(block: FrontmatterMap | undefined): PermissionRule[] {
   if (!block) return []
@@ -341,8 +316,6 @@ export function mapPermissionBlock(block: FrontmatterMap | undefined): Permissio
       }
     }
 
-    // `Array.prototype.sort` is stable, so equal effects keep file order.
-    actionRules.sort((left, right) => EFFECT_ORDER[left.effect] - EFFECT_ORDER[right.effect])
     rules.push(...actionRules)
   }
 
@@ -392,11 +365,14 @@ export function parseAgentMarkdown(fileName: string, markdown: string): AgentDef
     }
   }
 
-  const model = parseModelRef(scalar(frontmatter, 'model'), scalar(frontmatter, 'variant'))
+  const modelMap = isMap(frontmatter.model) ? frontmatter.model : undefined
+  const model = modelMap
+    ? parseModelRef(`${scalar(modelMap, 'providerID') ?? ''}/${scalar(modelMap, 'model') ?? ''}`, scalar(modelMap, 'variant'))
+    : parseModelRef(scalar(frontmatter, 'model'), scalar(frontmatter, 'variant'))
 
   const rawSteps = scalar(frontmatter, 'steps')
   const steps =
-    rawSteps !== undefined && /^\d+$/.test(rawSteps.trim())
+    rawSteps !== undefined && /^\d+$/.test(rawSteps.trim()) && Number.isSafeInteger(Number(rawSteps)) && Number(rawSteps) > 0
       ? Number(rawSteps.trim())
       : undefined
 
@@ -406,13 +382,33 @@ export function parseAgentMarkdown(fileName: string, markdown: string): AgentDef
       ? frontmatter.permissions
       : undefined
   const permissions = mapPermissionBlock(permissionBlock)
+  // Native V2 permissions are an ordered sequence, not the legacy map.
+  const nativeLines = lines.slice(opening + 1, lines.findIndex((line, index) => index > opening && line.trim() === '---'))
+  const start = nativeLines.findIndex((line) => /^permissions:\s*$/.test(line))
+  if (start !== -1) {
+    const rules: PermissionRule[] = []
+    let current: Record<string, string> | undefined
+    for (const line of nativeLines.slice(start + 1)) {
+      if (line.trim() && !/^\s/.test(line)) break
+      const match = line.match(/^\s*(?:-\s*)?(action|resource|effect):\s*(.*?)\s*$/)
+      if (!match) continue
+      if (/^\s*-/.test(line)) { current = {}; rules.push(current as unknown as PermissionRule) }
+      if (current) current[match[1]] = unquote(match[2])
+    }
+    if (rules.length) {
+      permissions.length = 0
+      for (const rule of rules) {
+        if (rule.action && rule.resource && ['allow', 'deny', 'ask'].includes(rule.effect)) permissions.push(rule)
+      }
+    }
+  }
 
   // `conductor` may read `.env` to debug a run; every other agent is denied
   // secrets even if its file forgot the rule.
   const hasEnvRule = permissions.some(
     (rule) => rule.action === ENV_READ_DENY.action && rule.resource === ENV_READ_DENY.resource,
   )
-  if (id !== DEFAULT_AGENT_ID && !hasEnvRule) {
+  if (id !== DEFAULT_AGENT_ID && !hasEnvRule && start === -1) {
     permissions.push({ ...ENV_READ_DENY })
   }
 
@@ -440,7 +436,7 @@ export function parseAgentMarkdown(fileName: string, markdown: string): AgentDef
  */
 export function resolveAssetsDir(moduleDir: string): string {
   const beside = join(moduleDir, 'assets')
-  if (nodeFs.existsSync(join(beside, 'fleet.json'))) return beside
+  if (nodeFs.existsSync(join(beside, 'agents'))) return beside
   return join(moduleDir, '..', 'assets')
 }
 
@@ -471,13 +467,13 @@ export function resolveAgentsDir(assetsDir: string): string {
 }
 
 /**
- * Load every agent definition from `assetsDir` and apply the fleet's model
- * overrides by id. Deterministic order (file name), so registration and the
- * materialised file set are stable between runs.
+ * Load native Markdown defaults in deterministic filename order. The legacy
+ * fleet argument is accepted for callers migrating away from it, never applied.
  */
+
 export function loadAgentDefinitions(
   assetsDir: string,
-  fleet: FleetConfig | null = null,
+  _fleet: FleetConfig | null = null,
 ): AgentDefinition[] {
   const agentsDir = resolveAgentsDir(assetsDir)
   const files = nodeFs
@@ -489,18 +485,6 @@ export function loadAgentDefinitions(
   for (const file of files) {
     const markdown = nodeFs.readFileSync(join(agentsDir, file), 'utf8')
     const definition = parseAgentMarkdown(file, markdown)
-
-    const entry = fleet?.models?.[definition.id]
-    if (entry !== undefined) {
-      const reference = typeof entry === 'string' ? entry : entry.model
-      const variant = typeof entry === 'string' ? undefined : entry.variant
-      const override = parseModelRef(reference, variant)
-      if (override) {
-        definition.model = override
-      } else {
-        delete definition.model
-      }
-    }
 
     definitions.push(definition)
   }
@@ -548,74 +532,38 @@ function describeError(error: unknown): string {
   return cleaned.length > 0 ? cleaned : 'unknown error'
 }
 
-/** Every model and provider the fleet knows about. */
-function fleetKnowledge(fleet: FleetConfig | null): {
-  providers: Set<string>
-  models: Set<string>
-} {
-  const providers = new Set<string>()
-  const models = new Set<string>()
-
-  for (const entry of Object.values(fleet?.models ?? {})) {
-    const reference =
-      typeof entry === 'string' ? entry : typeof entry?.model === 'string' ? entry.model : undefined
-    const parsed = parseModelRef(reference)
-    if (!parsed) continue
-    providers.add(parsed.providerID)
-    models.add(`${parsed.providerID}/${parsed.id}`)
-  }
-
-  const fallback = parseModelRef(fleet?.defaults?.fallbackModel)
-  if (fallback) providers.add(fallback.providerID)
-
-  return { providers, models }
+export type AgentFieldSource = 'packaged-md' | 'native' | 'legacy-fleet' | 'absent'
+export interface EffectiveAgentConfig {
+  id: string
+  description: string
+  mode: string
+  system: string
+  model?: string
+  variant?: string
+  steps?: number
+  permissions?: PermissionRule[]
+  sources: Record<'description' | 'mode' | 'system' | 'model' | 'variant' | 'steps' | 'permissions', AgentFieldSource>
+  warnings: string[]
 }
 
-/**
- * Decide a definition's effective model.
- *
- * A model the fleet does not know and whose provider the fleet does not know is
- * almost certainly a typo or a provider this install has no credentials for, so
- * it is replaced by `defaults.fallbackModel` and reported. A known provider
- * with an unlisted model is left alone: the fleet is a role map, not an
- * exhaustive model catalogue.
- */
-function resolveModel(
-  definition: AgentDefinition,
-  fleet: FleetConfig | null,
-  warnings: string[],
-): AgentDefinition {
-  const fallback = parseModelRef(fleet?.defaults?.fallbackModel)
-  const fallbackRef = fallback ? `${fallback.providerID}/${fallback.id}` : null
-
-  if (!definition.model) {
-    if (!fallback) {
-      warnings.push(`${definition.id}: no model declared and the fleet has no fallback model`)
-      return definition
+/** Pure, allowlisted inspector. Native values must come from the host, not provider config. */
+export function inspectAgentConfigs(definitions: readonly AgentDefinition[], native: Readonly<Record<string, MutableAgentConfig>> = {}): EffectiveAgentConfig[] {
+  return definitions.map((definition) => {
+    const host = native[definition.id]
+    const pick = <K extends 'description' | 'mode' | 'system' | 'model' | 'steps' | 'permissions'>(key: K) => host ? host[key] : definition[key]
+    const source = (key: 'description' | 'mode' | 'system' | 'model' | 'steps' | 'permissions'): AgentFieldSource =>
+      host ? (host[key] !== undefined ? 'native' : 'absent') : definition[key] === undefined ? 'absent' : 'packaged-md'
+    const model = pick('model') as AgentModelRef | undefined
+    const warnings: string[] = []
+    return {
+      id: definition.id, description: pick('description') ?? '', mode: pick('mode') ?? '',
+      system: pick('system') ?? '',
+      ...(model ? { model: `${model.providerID}/${model.id}`, ...(model.variant ? { variant: model.variant } : {}) } : {}),
+      ...(pick('steps') !== undefined ? { steps: pick('steps') as number } : {}),
+      ...(pick('permissions') !== undefined ? { permissions: (pick('permissions') as PermissionRule[]).map(({action, resource, effect}) => ({action, resource, effect})) } : {}),
+      sources: { description: source('description'), mode: source('mode'), system: source('system'), model: source('model'), variant: model?.variant ? source('model') : 'absent', steps: source('steps'), permissions: source('permissions') }, warnings,
     }
-    warnings.push(
-      `${definition.id}: no model declared; using the fleet fallback ${fallbackRef}`,
-    )
-    return { ...definition, model: fallback }
-  }
-
-  const known = fleetKnowledge(fleet)
-  const reference = `${definition.model.providerID}/${definition.model.id}`
-  if (known.models.has(reference) || known.providers.has(definition.model.providerID)) {
-    return definition
-  }
-
-  if (!fallback) {
-    warnings.push(
-      `${definition.id}: unknown model ${reference} and the fleet has no fallback model`,
-    )
-    return definition
-  }
-
-  warnings.push(
-    `${definition.id}: unknown model ${reference}; using the fleet fallback ${fallbackRef}`,
-  )
-  return { ...definition, model: fallback }
+  })
 }
 
 /** Copy a definition onto the mutable object the runtime exposes. */
@@ -640,10 +588,8 @@ function applyDefinition(agent: MutableAgentConfig, definition: AgentDefinition)
 /**
  * Register the roster.
  *
- * Files are the registration path: by default the roster is materialised as V2
- * markdown and no runtime transform runs. `transform: true` additionally
- * registers through `ctx.agent.transform` (kept for tests/experiments; it
- * destabilises the config location on OpenCode 2.1.3).
+ * Runtime transforms are the default. Native agents already present in the
+ * host are left unchanged; files are written only with explicit materialize.
  *
  * Never throws. Every failure is a `warnings` entry and the remaining work
  * continues: one agent the runtime refuses must not cost the other fourteen,
@@ -658,8 +604,8 @@ export async function registerAgents(
   const registered: string[] = []
   const materialized: string[] = []
 
-  const fleet = options.fleet ?? null
-  const resolved = definitions.map((definition) => resolveModel(definition, fleet, warnings))
+  // Kept as a compatibility input for explicit migration tools, never an authority.
+  const resolved = [...definitions]
 
   const defaultAgent = resolved.some((definition) => definition.id === DEFAULT_AGENT_ID)
     ? DEFAULT_AGENT_ID
@@ -678,8 +624,18 @@ export async function registerAgents(
       }
 
       await transform.call(agent, (editor: AgentEditor) => {
+        if (typeof editor.get !== 'function') {
+          warnings.push('agent.transform registration skipped: editor.get is unavailable; cannot safely detect existing native agents')
+          return
+        }
         for (const definition of resolved) {
           try {
+            // Existing host agents are authoritative, including explicit empty values.
+            // The host does not expose per-field configuration provenance here.
+            if (editor.get(definition.id)) {
+              registered.push(definition.id)
+              continue
+            }
             editor.update(definition.id, (target) => applyDefinition(target, definition))
             registered.push(definition.id)
           } catch (error) {

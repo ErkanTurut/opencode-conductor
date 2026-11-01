@@ -1,5 +1,46 @@
 # Changelog
 
+## 1.1.0 — 2026-11-01
+
+### Added
+
+- Eight native Desktop tabs: Runs, DAG, Gates, Refinements, Memory, Routing & timeline,
+  Agents, and Project. Runs separates active work from searchable, paginated history; DAGs
+  use compact task cards.
+- Native agent Markdown editor for model/variant, steps, prompt body, and permissions;
+  revision-checked saves preserve unrelated native keys, with confirmation for global edits.
+- Project settings editor backed by `.opencode/conductor.json`; startup and run initialization
+  consume branches, verification commands, preview awareness, and memory enabled state.
+- Four configuration RPC methods: `agentDocument`, `saveAgentConfiguration`,
+  `projectSettings`, and `saveProjectSettings`.
+- Run initialization returns project context and preview-configuration discovery. Closeout
+  records an explicit memory decision; curator handoffs can save immutable, evidence-linked
+  proposed project memory versions.
+
+### Changed
+
+- Native OpenCode agent Markdown and JSON/JSONC configuration are authoritative. Registration
+  and the runner no longer apply fleet catalog overrides; legacy fleet tools/UI remain a
+  separate catalog, not the active runtime model authority. Migrate model choices to native
+  agent Markdown.
+- GUI writes are limited to the configuration RPCs above. They cannot loosen trust/host
+  permissions, approve work, or perform remote actions.
+
+### Release evidence
+
+- `bun test`: 959 passed across 82 files; `bun run typecheck`: 41 existing diagnostics,
+  0 new against the recorded baseline; GUI typecheck, GUI build, GUI smoke, and full build
+  passed.
+- Activated the installed checkout at this commit (preserving existing user edits), restarted
+  the service, and confirmed the plugin reports `server`, `rpc`, and `gui` active. The served
+  GUI bundle contains the new configuration views.
+- Live project reads were checked against real projects. Live agent save, effective host
+  reload, project-settings save, preview awareness, and stale-revision refusal were checked
+  with temporary files in a trusted project, then removed.
+- Manual Desktop panel click-through, provider preview deployments, and remote PRs were not
+  exercised. Configuration saves are server-verified; visual Desktop sign-off remains a
+  separate check.
+
 ## 1.0.1 — 2026-10-30
 
 ### Fixed

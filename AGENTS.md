@@ -17,12 +17,13 @@ This file is the operating guide for an AI agent (or a human) starting a fresh s
 ## What this package is
 
 - **Server part** (`index.ts` → `src/index.ts`): `Plugin.define` from `@opencode/plugin`.
-  It registers the `supervisor_*` tools, the 15 agents (`ctx.agent.transform`), the 15 skills
+  It registers the `supervisor_*` tools, the 15 agents from native Markdown, the 15 skills
   (`ctx.skill.transform`), and the RPC contract (`ctx.rpc.register`).
-- **RPC** (`src/rpc-contract.ts`, `src/rpc/register.ts`): ten read-only methods over the
-  project ledger and run artifacts. The GUI is a client of this contract.
-- **GUI** (`src/gui.tsx`, `src/gui/**`, built to `dist/gui-experimental.cjs`): a read-only
-  OpenCode Desktop side panel with Runs, DAG, Gates, Refinements, Memory, and Routing & Timeline.
+- **RPC** (`src/rpc-contract.ts`, `src/rpc/register.ts`): read methods plus four narrowly
+  scoped configuration methods with fixed targets and revision checks.
+- **GUI** (`src/gui.tsx`, `src/gui/**`, built to `dist/gui-experimental.cjs`): an OpenCode
+  Desktop workspace with eight tabs: Runs, DAG, Gates, Refinements, Memory, Routing
+  & Timeline, Agents, and Project. Agent/project configuration saves are its only writes.
 - **State** is project-level: `<project>/.opencode/supervisor.db`, `.opencode/runs/`,
   `.opencode/memory/`. A scratch/non-repository directory uses the central home under
   `~/.local/share/opencode-conductor/projects/<slug>-<hash8>/`.
@@ -31,7 +32,7 @@ This file is the operating guide for an AI agent (or a human) starting a fresh s
 
 ```sh
 bun install
-bun test                                   # 855 tests
+bun test
 bun run typecheck                          # baseline-gated server typecheck
 bunx tsc -p tsconfig.gui.json --noEmit     # GUI typecheck
 bun run gui:build                          # dist/gui-experimental.cjs
@@ -39,17 +40,19 @@ bun run smoke:gui                          # loads the built bundle with a fake 
 bun run build                              # CLI + GUI
 ```
 
-Run all of them before calling a change done. `bun test` must stay green; do not update
+Run all applicable checks before calling a change done; do not claim pending release checks
+passed. `bun test` must stay green; do not update
 `typecheck-baseline.json` unless a genuinely new diagnostic is unavoidable, and explain why.
 
 ## Hard constraints
 
-### The GUI is read-only
+### GUI authority and bounded configuration writes
 
-- No approval, retry, pause, resume, launch, or file-write action in the panel.
+- The only GUI writes are agent/project configuration through `agentDocument`, `saveAgentConfiguration`, `projectSettings`, and `saveProjectSettings`. These use fixed targets and revision checks. No approval, retry, pause, resume, launch, push, PR, or merge action exists.
 - The GUI must not import `bun:sqlite`, `node:fs`, `src/plugin.ts`, `src/ledger/*`, or
   `src/read/*`. It talks to the server only through `ctx.client.rpc(ConductorRpc)`.
-- RPC inputs are ids and pagination values only. A method never accepts a filesystem path.
+- RPC inputs are identifiers, revisions, settings, and pagination values only. A method never
+  accepts a filesystem path.
 - The server reads through the resolved `StateLayout`; the read-only ledger opens with
   `readonly: true` and never creates or migrates the database.
 
@@ -63,14 +66,17 @@ const location = () => ({ directory: props.session.directory })
 await rpc().runs({ limit: 50 }, { location: location() })
 ```
 
-Do this for every method: `runs`, `run`, `dag`, `gates`, `refinements`, `memory`,
-`memoryBlock`, `routing`, `timeline`. The smoke script checks the bundle shape, not location
-wiring; a manual check against a project with runs is still required.
+Do this for every method: `workspace`, `configuration`, `project`, `runs`, `run`, `dag`,
+`gates`, `refinements`, `memory`, `memoryBlock`, `routing`, `timeline`, `agentDocument`,
+`saveAgentConfiguration`, `projectSettings`, and `saveProjectSettings`. The smoke script checks
+the bundle shape, not location wiring; a manual check against a project with runs is still
+required.
 
 ### Do not disturb an active conductor run
 
 - GUI-only changes (`src/gui/**`, `dist/gui-experimental.cjs`) reload the GUI in the Desktop
-  window; the server entry does not restart.
+  window; the server entry does not restart. Configuration writes are saved files; if host
+  reload fails, describe them as saved-not-applied until effective settings are verified.
 - Server/RPC changes (`src/index.ts`, `src/rpc/**`, `src/read/**`, `src/plugin.ts`) can
   reload the plugin. While a conductor run is active, avoid them unless the user explicitly
   accepts the reload. Never use the GUI work as a reason to restart the service.
@@ -97,7 +103,7 @@ authorization. Tags are prepared locally; the author pushes.
 | `index.ts` | Root mount shim; re-exports `src/index.ts`. |
 | `src/index.ts` | `Plugin.define`, `setupConductor`: probe, identity/layout, roster, skills, tools, RPC. |
 | `src/plugin.ts` | Supervisor config, ledger/tool registration, the 15 `supervisor_*` tools. |
-| `src/register/agents.ts` | Frontmatter parser, fleet model resolution, `ctx.agent.transform` registration. |
+| `src/register/agents.ts` | Native Markdown parser and agent registration. |
 | `src/register/skills.ts` | `SKILL.md` loading and `ctx.skill.transform` registration. |
 | `src/register/tools.ts` | Trust gate and read-only tool classification. |
 | `src/runtime/state-layout.ts` | Single path authority: local vs central ledger/runs/memory. |
@@ -112,7 +118,8 @@ authorization. Tags are prepared locally; the author pushes.
 | `src/rpc/register.ts` | Binds the contract to the readers; feature-detects `ctx.rpc.register`. |
 | `src/gui.tsx` | GUI entry: `Plugin.define`, `Panel`, `Command`, `MenuItem`, `Style`. |
 | `src/gui/panel.tsx` | Fetch loop, polling, selected run, tab switch, session location. |
-| `src/gui/views/*` | Runs, DAG, Gates, Refinements, Memory, Routing & Timeline. |
+| `src/gui/views/*` | Runs, DAG, Gates, Refinements, Memory, Routing & Timeline, Agents, Project. |
+| `src/runtime/{run-safety,plan-revisions,project-governance,memory-review,configuration-store,preview,closeout}.ts` | Safety decisions, configuration saves, preview awareness, memory closeout and review contracts. Provider/auth integrations remain unintegrated. |
 | `src/gui/format.ts`, `src/gui/data.ts`, `src/gui/dag-layout.ts` | Pure formatting/defensive parsing/DAG geometry. |
 | `assets/agents`, `assets/skills`, `assets/fleet.json` | Runtime roster assets. Must be shipped. |
 | `dist/gui-experimental.cjs` | Built CommonJS GUI bundle; committed for GitHub installs. |
@@ -128,7 +135,7 @@ authorization. Tags are prepared locally; the author pushes.
 4. `bunx tsc -p tsconfig.gui.json --noEmit`
 5. `bun run gui:build`
 6. `bun run smoke:gui`
-7. In Desktop: **Settings → Extensions → Plugins → conductor → Reload**, or run
+7. In Desktop: **Settings → Extensions → Plugins → conductor → Reload** (configuration is watched; writes do not require service restart), or run
    `bun run gui:watch` while iterating.
 8. Open the Conductor panel from the session side panel's **+** menu and check the affected
    view with real runs. Use a project that has runs (for example saul).
@@ -188,7 +195,7 @@ Read AGENTS.md, docs/ARCHITECTURE.md, docs/GUI-ITERATION.md, and docs/RPC.md fir
 Task: <describe the GUI change or bug>
 
 Constraints:
-- GUI is read-only; no writes, approvals, retries, or filesystem access in the panel.
+- GUI configuration writes are limited to the four revision-checked agent/project RPCs; no run/approval/remote action or GUI filesystem access.
 - Every GUI RPC call must pass { location: { directory: props.session.directory } }.
 - Do not restart the server or mutate .opencode/supervisor.db / runs / memory.
 - Do not modify server/RPC code while a conductor run is active unless I explicitly approve.
@@ -208,4 +215,5 @@ bun run smoke:gui
 - `bun run build` (rebuilds the committed GUI bundle).
 - Commit and tag locally; do not push or rewrite a published tag without authorization.
 - `v1.0.0` is the published baseline; `v1.0.1` is the launcher + session-location fix.
-  Install with `opencode plugin add github:ErkanTurut/opencode-conductor#v1.0.1`.
+  The documented v1.1.0 install target is `github:ErkanTurut/opencode-conductor#v1.1.0`;
+  publication and verification evidence are pending.

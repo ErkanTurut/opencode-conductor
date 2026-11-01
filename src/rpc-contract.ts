@@ -6,8 +6,8 @@
 // so other plugins and clients can import the token without loading the
 // conductor runtime.
 //
-// All methods are read-only in v1. Inputs are small, project-scoped
-// identifiers; a method never accepts an arbitrary filesystem path.
+// Run projections are read-only. Explicit configuration saves use fixed server
+// targets and revision checks; no method accepts an arbitrary filesystem path.
 
 import { Rpc } from '@opencode/plugin/rpc'
 
@@ -45,6 +45,30 @@ export const ConductorRpc = Rpc.define({
   methods: {
     /** Project identity, state layout, trust and policy summary. */
     workspace: {
+      input: empty,
+      output: envelope,
+    },
+    /** Native agent configuration and source provenance, without provider credentials. */
+    configuration: {
+      input: empty,
+      output: envelope,
+    },
+    agentDocument: {
+      input: object({ scope: { enum: ['project', 'global'] }, agentId: string }, ['scope', 'agentId']),
+      output: envelope,
+    },
+    saveAgentConfiguration: {
+      input: object({ scope: { enum: ['project', 'global'] }, agentId: string, expectedRevision: string,
+        fields: { type: 'object', additionalProperties: true } }, ['scope', 'agentId', 'expectedRevision', 'fields']),
+      output: envelope,
+    },
+    projectSettings: { input: empty, output: envelope },
+    saveProjectSettings: {
+      input: object({ expectedRevision: string, settings: { type: 'object', additionalProperties: true } }, ['expectedRevision', 'settings']),
+      output: envelope,
+    },
+    /** Project governance configuration and explicitly reported integration capabilities. */
+    project: {
       input: empty,
       output: envelope,
     },
@@ -134,6 +158,88 @@ export interface WorkspaceData {
   }
 }
 
+export interface ConfigurationAgent {
+  id: string
+  description: string
+  mode: string
+  system: string
+  model: string | null
+  variant: string | null
+  steps: number | null
+  permissions: unknown[]
+  sources: Record<string, string>
+  warnings: string[]
+}
+
+export interface ConfigurationData {
+  agents: ConfigurationAgent[]
+  models?: Array<{ id: string; name: string; variants: string[] }>
+  nativeResolved: boolean
+  readOnly: true
+  warnings: string[]
+  skillPolicy: string
+}
+
+export type ConfigurationScope = 'project' | 'global'
+export interface ConfigurationPermission { action: string; resource: string; effect: 'allow' | 'ask' | 'deny' }
+export interface AgentConfigurationFields {
+  model: string
+  steps: number | null
+  system: string
+  permissions: ConfigurationPermission[]
+}
+export interface AgentConfigurationDocument {
+  agentId: string
+  scope: ConfigurationScope
+  target: string
+  revision: string
+  fields: AgentConfigurationFields
+  writable: boolean
+  warnings: string[]
+}
+export interface ProjectSettings {
+  branches: { main: string; dev: string }
+  verificationCommands: string[]
+  preview: { provider: 'vercel' | 'other' | 'none'; url: string; branch: string }
+  memory: { enabled: boolean }
+}
+export interface ProjectSettingsDocument {
+  target: string
+  revision: string
+  settings: ProjectSettings | null
+  warnings: string[]
+}
+
+export interface PreviewAwareness {
+  provider: 'vercel' | 'other' | 'none' | 'unknown'
+  configured: boolean
+  url: string | null
+  branch: string
+  sources: string[]
+  deploymentVerified: false
+  guidance: string[]
+}
+
+export interface ProjectData {
+  projectRoot: string
+  branches: { main: string; dev: string } | null
+  verificationCommands: string[]
+  policy: {
+    repository: string
+    remotes: string[]
+    targets: string[]
+    operations: string[]
+    requiredChecks: string[]
+    previewProviders: string[]
+    maxObservationAgeMs: number
+  } | null
+  policyHash: string | null
+  policySource: string
+  capabilities: { mergeExecutor: 'unavailable'; previewAdapter: 'unavailable'; remoteProtection: 'unknown' }
+  warnings: string[]
+  preview?: PreviewAwareness
+}
+
 export interface RunSummary {
   id: string
   state: string
@@ -203,6 +309,7 @@ export interface RunDetailData {
   }>
   eventCount: number
   runDir: string | null
+  planRevisions?: Array<{ revision: number; parentRevision: number | null; reason: string; createdAt: string }>
 }
 
 export interface DagNode {
@@ -284,8 +391,16 @@ export interface GatesData {
     blockingFindings: number
     openFindings: number
     passed: boolean | null
+    requiredCommands?: string[]
+    missingCommands?: string[]
   }>
   mergeReady: boolean
+  /** Recorded evidence is not authorization to merge or push. */
+  readiness?: {
+    evidenceReady: boolean
+    authoritative: false
+    reasons: string[]
+  }
 }
 
 export interface RefinementData {
@@ -316,6 +431,14 @@ export interface MemoryBlockSummary {
   sourceRunId: string | null
   contentPreview: string
   updatedAt: string | null
+  review?: MemoryReviewData
+}
+
+export interface MemoryReviewData {
+  classification: 'approved' | 'unknown' | 'unreviewed' | 'stale' | 'conflicting'
+  eligible: boolean
+  reasons: string[]
+  action: 'use' | 'propose_review'
 }
 
 export interface MemoryData {
@@ -336,6 +459,7 @@ export interface MemoryBlockData {
   contentHash: string | null
   actor: string | null
   supersedes: string | null
+  review?: MemoryReviewData
 }
 
 export interface RoutingData {

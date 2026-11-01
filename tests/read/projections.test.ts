@@ -268,8 +268,8 @@ describe('projections — gates', () => {
     expect(data.mergeReady).toBe(false)
   })
 
-  it('is merge-ready when every verification passes and nothing blocks', () => {
-    const tasks = [taskById(ids.taskIds.a)]
+  it('distinguishes completed evidence from permission to merge', () => {
+    const tasks = [{ ...taskById(ids.taskIds.a), state: 'completed' }]
     const verifications = reader
       .verifications(ids.runId)
       .filter((verification) => verification.attemptId === ids.attemptIds.a)
@@ -282,7 +282,10 @@ describe('projections — gates', () => {
       approvals: [],
     })
     expect(data.tasks[0].passed).toBe(true)
-    expect(data.mergeReady).toBe(true)
+    expect(data.readiness?.evidenceReady).toBe(true)
+    expect(data.readiness?.authoritative).toBe(false)
+    expect(data.mergeReady).toBe(false)
+    expect(data.readiness?.reasons.some(reason => reason.includes('Candidate-bound approval'))).toBe(true)
   })
 
   it('is not merge-ready for an empty run or with an open blocking finding', () => {
@@ -315,7 +318,7 @@ describe('projections — gates', () => {
         findings: nonBlocking,
         approvals: [],
       }).mergeReady,
-    ).toBe(true)
+    ).toBe(false)
 
     const blocking = nonBlocking.map((finding) =>
       finding.id === 'finding-run' ? { ...finding, blocking: true } : finding,
@@ -330,6 +333,15 @@ describe('projections — gates', () => {
         approvals: [],
       }).mergeReady,
     ).toBe(false)
+  })
+
+  it('does not accept unrelated passing checks in place of required commands', () => {
+    const task = { ...taskById(ids.taskIds.a), state: 'completed', verificationCommands: ['bun test', 'bun run build'] }
+    const data = gates({ tasks: [task], findings: [] })
+    expect(data.tasks[0]?.missingCommands).toEqual(['bun run build'])
+    expect(data.tasks[0]?.passed).toBe(false)
+    expect(data.readiness?.evidenceReady).toBe(false)
+    expect(data.mergeReady).toBe(false)
   })
 })
 

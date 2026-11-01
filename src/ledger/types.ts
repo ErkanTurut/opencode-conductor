@@ -71,7 +71,7 @@ export interface AttemptRow {
   started_at: string | null
   finished_at: string | null
   exit_code: number | null
-  failure_class: AttemptFailureClass | null
+  failure_class: AttemptFailureClass | 'plan_or_policy_invalidated' | null
   usage_json: string | null
   cost_json: string | null
   stdout_path: string | null

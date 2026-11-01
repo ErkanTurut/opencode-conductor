@@ -1,3 +1,4 @@
+import { collectWorkspaceChanges, validateChangedFiles, validateWorkspaceBinding } from './ledger/scope'
 // Provenance: the scheduler pre-check wiring (fail-closed DAG + write-scope
 // admission), unified verification dir, and stdout-only verification gate
 // are adapted from the OmO comparison notes (idea 3 — rounds/sweep slot and
@@ -17,19 +18,6 @@ import {
   canonicalWorktreeId,
 } from './worktrees'
 import { Watchdog } from './watchdog'
-import {
-  selectFallbackModel,
-  recordModelFailure,
-  recordModelSuccess,
-} from './model-router'
-import type { ModelRegistry } from './model-router'
-import type { SelectionEvent } from './model-router'
-import {
-  loadFleetConfig,
-  buildModelRegistry,
-  selectFleetModel,
-} from './fleet-config'
-import type { FleetConfig, FleetSelection } from './fleet-config'
 import {
   runVerification,
   getArtifactPaths,
@@ -51,6 +39,10 @@ import {
   type PermissionRule,
 } from './policy'
 import { readFileSync } from 'node:fs'
+import { recordMemoryDecision, persistCuratorProposal, type MemoryDecision, type CuratorProposal } from './runtime/closeout'
+import { loadProjectSettings } from './runtime/configuration-store'
+import { resolveStateLayout } from './runtime/state-layout'
+import { readOptionalArtifact } from './runtime/safe-write'
 
 /**
  * Parse a work item's recorded verification commands.
@@ -66,7 +58,8 @@ export function parseRecordedVerificationCommands(
   try {
     const parsed = JSON.parse(value)
     if (!Array.isArray(parsed)) return null
-    return parsed.filter((entry): entry is string => typeof entry === 'string')
+    if (parsed.some((entry) => typeof entry !== 'string' || !entry.trim())) return null
+    return parsed
   } catch {
     return null
   }
@@ -202,8 +195,6 @@ export class Runner {
   private worktrees: WorktreeProvider
   private watchdog: Watchdog
   private config: RunnerConfig
-  private fleetConfig: FleetConfig
-  private modelRegistry: ModelRegistry
 
   constructor(config: RunnerConfig) {
     this.config = config
@@ -215,10 +206,6 @@ export class Runner {
       mainRepoPath: config.mainRepoPath,
     })
     this.watchdog = new Watchdog(this.ledger)
-    // Registry comes from the merged fleet-config view (built-ins patched
-    // with persisted enabled flags + extra catalog entries).
-    this.fleetConfig = loadFleetConfig()
-    this.modelRegistry = buildModelRegistry(this.fleetConfig)
   }
 
   async createRun(
@@ -446,70 +433,25 @@ export class Runner {
       ...JSON.parse(run.budget_json || '{}'),
     }
 
-    // Claim lease
-    const leaseOwner = `worker-${process.pid}`
-    const leaseExpiry = new Date(
-      Date.now() + budget.max_task_wall_time_ms,
-    ).toISOString()
-
-    const claim = await this.ledger.claimLease({
-      workItemId,
-      leaseOwner,
-      leaseExpiresAt: leaseExpiry,
-    })
-
-    if (!claim.claimed) {
-      return { success: false, error: 'Failed to claim lease' }
-    }
-
-    // Increment attempts and transition to running
-    await this.ledger.incrementWorkItemAttempts(workItemId)
-    await this.ledger.transitionWorkItemState(workItemId, 'running')
-
-    // Select model (fleet-config aware: overrides + disabled exclusion)
+    // OpenCode owns model selection for native agents. Never override it with
+    // a second fleet catalog. The CLI adapter does not report resolved models,
+    // so provenance remains explicitly unknown rather than a guessed default.
     const role = item.owner_role as AgentRole
 
-    // Selection observability. Every evaluated rung is ledgered as a
-    // rung-schema SelectionEvent (`model_selected` /
-    // `no_cross_family_substitution`) so routing decisions survive process exit
-    // and `ModelRouter.restore` can rebuild breaker + last-rung memory.
-    const onSelection = async (event: SelectionEvent) => {
-      try {
-        await this.ledger.appendEvent({
-          runId: item.run_id,
-          workItemId,
-          eventType: event.type,
-          actor: 'supervisor',
-          payloadJson: JSON.stringify(event),
-        })
-      } catch {
-        // Observability must never block or fail task execution.
-      }
-    }
-
-    // Feature test (NOT an arity gate): the options-aware selector names its
-    // `onSelection` option in the source; the legacy 3-arg selector never
-    // mentions it. `Function.length` reports 3 for a defaulted options param,
-    // so arity cannot distinguish the merged t6 API — this probe does.
-    const supportsObserver = (() => {
-      try {
-        return /onSelection/.test(Function.prototype.toString.call(selectFleetModel))
-      } catch {
-        return false
-      }
-    })()
-    const selection = supportsObserver
-      ? selectFleetModel(this.modelRegistry, this.fleetConfig, role, { onSelection })
-      : selectFleetModel(this.modelRegistry, this.fleetConfig, role)
-    if (!selection) {
-      await this.ledger.releaseLease(workItemId, claim.fencingToken)
-      await this.ledger.transitionWorkItemState(workItemId, 'blocked')
-      return { success: false, error: 'No available model for role' }
-    }
+    const attemptId = `att-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    const leaseOwner = `worker-${process.pid}`
+    const leaseExpiry = new Date(Date.now() + (budget.max_task_wall_time_ms ?? DEFAULT_BUDGET.max_task_wall_time_ms)).toISOString()
+    const claim = this.ledger.claimTaskAtomic ? await this.ledger.claimTaskAtomic({
+      runId: item.run_id, workItemId, leaseOwner, leaseExpiresAt: leaseExpiry,
+      attempt: { id: attemptId, workItemId, harness: 'opencode-cli', modelProvider: 'unknown',
+        modelId: 'unknown', modelVariant: null, workspaceId: null, baseSha: '' },
+    }) : { claimed: false, fencingToken: -1, error: 'Atomic admission unavailable' }
+    if (!claim.claimed) return { success: false, error: claim.error ?? 'Failed to claim lease' }
 
     // Create worktree for mutating tasks
     let worktreeId: string | null = null
     let worktreePath: string = this.config.mainRepoPath
+    let workspaceBaseSha = ''
 
     // Shared role partition (types.ts): only mutating roles get a worktree and
     // only they are held to the non-empty verification gate.
@@ -523,6 +465,7 @@ export class Runner {
 
       try {
         const baseSha = await this.worktrees.resolveBaseSha()
+        workspaceBaseSha = baseSha
 
         const wt = await this.worktrees.createWorktree(
           worktreeId,
@@ -531,27 +474,24 @@ export class Runner {
         )
         worktreePath = wt.path
       } catch (e) {
-        await this.ledger.releaseLease(workItemId, claim.fencingToken)
-        await this.ledger.transitionWorkItemState(workItemId, 'failed')
+        await this.ledger.finishTaskAtomic?.({ runId: item.run_id, workItemId, attemptId, fencingToken: claim.fencingToken, success: false, exitCode: null, failureClass: 'workspace_error', usageJson: null, evidenceJson: null })
         return { success: false, error: `Failed to create worktree: ${e}` }
       }
     }
 
-    // Create attempt
-    const attemptId = `att-${Date.now()}`
-    await this.ledger.createAttempt({
-      id: attemptId,
-      workItemId,
-      attemptNo: item.attempts + 1,
-      harness: 'opencode-cli',
-      modelProvider: selection.providerId,
-      modelId: selection.modelId,
-      modelVariant: selection.variant ?? null,
-      workspaceId: worktreeId,
-      baseSha: worktreePath
-        ? (await Bun.$`git -C ${worktreePath} rev-parse HEAD`.text()).trim()
-        : '',
-    })
+    try {
+      // Read-only tasks can run in non-git directories; no source base is
+      // asserted there. Mutating work always requires a real git base.
+      if (isMutating) {
+        const workspace = worktreeId ? await this.ledger.getWorkspace(worktreeId) : null
+        if (!workspace || workspace.base_sha !== workspaceBaseSha || !(await validateWorkspaceBinding(this.config.mainRepoPath, workspace, canonicalWorktreeId(workItemId), canonicalWorktreeBranch(workItemId), true))) throw new Error('Authoritative task workspace binding unavailable')
+      }
+      const bound = await this.ledger.bindAttemptWorkspace?.(attemptId, workItemId, claim.fencingToken, worktreeId, workspaceBaseSha)
+      if (!bound) throw new Error('Stale attempt or workspace binding unavailable')
+    } catch (error) {
+      await this.ledger.finishTaskAtomic?.({ runId: item.run_id, workItemId, attemptId, fencingToken: claim.fencingToken, success: false, exitCode: null, failureClass: 'workspace_error', usageJson: null, evidenceJson: null })
+      return { success: false, error: `Failed to bind task workspace: ${error}` }
+    }
 
     // Start heartbeat
     this.watchdog.startHeartbeat(workItemId, claim.fencingToken)
@@ -585,8 +525,6 @@ export class Runner {
         runId: item.run_id,
         objective: item.title,
         role: item.owner_role,
-        model: `${selection.providerId}/${selection.modelId}`,
-        variant: selection.variant,
         worktree: worktreePath,
         allowedPaths,
         acceptanceCriteria,
@@ -635,7 +573,6 @@ export class Runner {
 
       // Record outcome
       if (resultResult.success) {
-        recordModelSuccess(this.modelRegistry, selection.key)
 
         // Run verification into the unified verification dir. An empty command
         // list is a hard failure FOR MUTATING ROLES: `[].every(...)` is vacuously
@@ -676,47 +613,55 @@ export class Runner {
           ? false
           : verificationSkipped
             ? true
-            : hasVerificationCommands && verificationResults.every((r) => r.passed)
-        const completed = resultResult.exitCode === 0 && allPassed
+            : hasVerificationCommands && verificationResults.length === verificationCommands.length && verificationResults.every((r) => r.passed)
+        let changedFiles: string[] = []
+        let scopeError: string | null = null
+        if (isMutating) {
+          try {
+            const attempt = await this.ledger.getAttempt(attemptId)
+            const workspace = worktreeId ? await this.ledger.getWorkspace(worktreeId) : null
+            if (!attempt || !workspace || attempt.workspace_id !== worktreeId || attempt.base_sha !== workspace.base_sha || !(await validateWorkspaceBinding(this.config.mainRepoPath, workspace, canonicalWorktreeId(workItemId), canonicalWorktreeBranch(workItemId), false))) throw new Error('workspace binding unavailable')
+            changedFiles = await collectWorkspaceChanges(worktreePath, attempt?.base_sha ?? '')
+            const writeScopes = JSON.parse(item.write_scope_json)
+            if (!Array.isArray(writeScopes) || !Array.isArray(allowedPaths)) throw new Error('invalid scope data')
+            scopeError = validateChangedFiles(worktreePath, changedFiles, writeScopes, allowedPaths)
+          } catch { scopeError = 'scope_evidence_unavailable' }
+        }
+        const completed = resultResult.exitCode === 0 && allPassed && !scopeError
         // The empty-profile failure class is reserved for MUTATING roles and
         // unresolvable records: a read-only task that declares no commands but
         // exits non-zero is an ordinary `exit_nonzero`, never a
         // missing-verification-profile failure.
         const failureClass = completed
           ? null
-          : verificationUnresolved || (!hasVerificationCommands && isMutating)
+          : scopeError ?? (verificationUnresolved || (!hasVerificationCommands && isMutating)
             ? 'no_verification_commands'
             : allPassed
               ? 'exit_nonzero'
-              : 'verification_failed'
+              : verificationResults.some(r => r.exitCode === 124) ? 'infrastructure_timeout_or_exit_124' : 'verification_failed')
 
         // Get evidence
         const evidence = {
           attempted_at: new Date().toISOString(),
-          model: `${selection.providerId}/${selection.modelId}`,
-          model_key: selection.key,
+          model: null,
+          model_source: 'native-agent (resolved model unavailable from CLI adapter)',
           duration_ms: resultResult.durationMs,
           usage: resultResult.usage,
           verification_results: verificationResults,
-          all_checks_passed: allPassed,
+          all_checks_passed: allPassed && !scopeError,
           verification_skipped: verificationSkipped,
           failure_class: failureClass,
-          changed_files: worktreeId
-            ? await this.worktrees.getChangedFiles(worktreeId)
-            : [],
+          changed_files: changedFiles,
+          scope_enforcement: isMutating ? (scopeError ?? 'checked') : 'not_applicable',
         }
 
-        await this.ledger.completeAttempt(
-          attemptId,
-          resultResult.exitCode,
-          resultResult.usage ? JSON.stringify(resultResult.usage) : null,
-          null,
-          null,
-          JSON.stringify(evidence),
-        )
+        const recorded = await this.ledger.finishTaskAtomic?.({ runId: item.run_id, workItemId, attemptId,
+          fencingToken: claim.fencingToken, success: completed, exitCode: resultResult.exitCode,
+          failureClass, usageJson: resultResult.usage ? JSON.stringify(resultResult.usage) : null,
+          evidenceJson: JSON.stringify(evidence) })
+        if (!recorded) return { success: false, error: 'Stale attempt or fencing token' }
 
         if (completed) {
-          await this.ledger.transitionWorkItemState(workItemId, 'completed')
           // Read-only tasks with no commands: record that the gate was skipped
           // rather than silently passing an empty profile.
           if (verificationSkipped) {
@@ -743,7 +688,6 @@ export class Runner {
             payloadJson: JSON.stringify({ from: 'running', to: 'completed' }),
           })
         } else {
-          await this.ledger.transitionWorkItemState(workItemId, 'failed')
           await this.ledger.appendEvent({
             runId: item.run_id,
             workItemId,
@@ -761,44 +705,20 @@ export class Runner {
         return { success: completed }
       }
 
-      // Failure path
-      recordModelFailure(this.modelRegistry, selection.key)
-
-      // Try fallback model
-      const fallback = selectFallbackModel(
-        this.modelRegistry,
-        selection.key,
-        role,
-      )
-      if (fallback) {
-        // Could retry with fallback, but defer to repair loop for now
-        await this.ledger.appendEvent({
-          runId: item.run_id,
-          workItemId,
-          attemptId,
-          eventType: 'attempt_failed',
-          actor: 'supervisor',
-          payloadJson: JSON.stringify({
-            reason: 'primary_model_failed',
-            fallback_available: fallback.key,
-          }),
-        })
-      }
-
-      await this.ledger.failAttempt(
-        attemptId,
-        resultResult.exitCode !== 0 ? 'exit_nonzero' : 'unknown',
-        resultResult.exitCode,
-        resultResult.usage ? JSON.stringify(resultResult.usage) : null,
-        null,
-      )
-
-      await this.ledger.transitionWorkItemState(workItemId, 'failed')
+      const recorded = await this.ledger.finishTaskAtomic?.({ runId: item.run_id, workItemId, attemptId,
+        fencingToken: claim.fencingToken, success: false, exitCode: resultResult.exitCode,
+        failureClass: resultResult.exitCode !== 0 ? 'exit_nonzero' : 'unknown',
+        usageJson: resultResult.usage ? JSON.stringify(resultResult.usage) : null, evidenceJson: null })
+      if (!recorded) return { success: false, error: 'Stale attempt or fencing token' }
 
       return {
         success: false,
         error: resultResult.stderr || 'Task execution failed',
       }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      await this.ledger.finishTaskAtomic?.({ runId: item.run_id, workItemId, attemptId, fencingToken: claim.fencingToken, success: false, exitCode: null, failureClass: /timed?\s*out|timeout/i.test(message) ? 'infrastructure_timeout' : 'verification_or_runtime_error', usageJson: null, evidenceJson: JSON.stringify({ error: message }) })
+      return { success: false, error: message }
     } finally {
       // Lease release is unconditional: success, failure, or throw.
       this.watchdog.stopHeartbeat(workItemId)
@@ -828,6 +748,10 @@ export class Runner {
     if (item.state === 'running') {
       throw new Error(`retryNode: node ${workItemId} is already running`)
     }
+    const run = await this.ledger.getRun(item.run_id)
+    let maxAttempts = DEFAULT_BUDGET.max_attempts_per_task
+    try { maxAttempts = JSON.parse(run?.budget_json ?? '{}').max_attempts_per_task ?? maxAttempts } catch { throw new Error('retryNode: invalid budget') }
+    if (!Number.isSafeInteger(maxAttempts) || maxAttempts < 1 || item.attempts >= maxAttempts) throw new Error('retryNode: attempt budget exhausted')
 
     const previous = await this.ledger.getLatestAttempt(workItemId)
     const inputsHash = String(
@@ -952,10 +876,23 @@ export class Runner {
     return { workItemId, acceptanceCriteria: next, added }
   }
 
-  async generateRunReceipt(runId: string): Promise<string> {
+  async generateRunReceipt(runId: string, memory?: { decision: MemoryDecision; proposal?: CuratorProposal }): Promise<string> {
+    if (!/^[A-Za-z0-9_-]+$/.test(runId) || !await this.ledger.getRun(runId)) throw new Error('Invalid or unknown run ID')
     const receipt = await generateReceipt(runId, this.ledger)
     const paths = getArtifactPaths(runId, this.config.repoRoot)
     await ensureArtifactDirs(paths)
+    const enabled = loadProjectSettings(this.config.repoRoot)?.memory.enabled ?? true
+    const prior = readOptionalArtifact(`${paths.runDir}/memory-decision.json`)
+    const decision = memory?.decision ?? (prior ? JSON.parse(prior) as MemoryDecision : undefined) ?? (!enabled ? { decision: 'disabled' as const, rationale: 'Memory learning is disabled by explicit project settings.' } : undefined)
+    if (enabled && decision?.decision === 'disabled') throw new Error('Memory is not disabled in project settings')
+    if (!enabled && decision?.decision === 'curate') throw new Error('Memory learning is disabled in project settings')
+    const recorded = recordMemoryDecision(paths.runDir, runId, decision)
+    if (!recorded.ok) throw new Error(recorded.error)
+    if (recorded.handoff) {
+      if (!memory?.proposal) throw new Error('memory_curator_handoff_required: delegate memory-curator, then submit its evidence-linked proposal')
+      const saved = persistCuratorProposal(resolveStateLayout({ projectRoot: this.config.repoRoot }).memoryDir, paths.runDir, runId, memory.proposal)
+      if (!saved.ok) throw new Error(saved.error)
+    } else if (memory?.proposal) throw new Error('Proposal requires a curate decision')
     const receiptPath = `${paths.runDir}/receipt.md`
     await writeReceiptToDisk(receipt, receiptPath)
     return receiptPath

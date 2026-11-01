@@ -16,9 +16,10 @@ OpenCode Supervisor CLI
 
 Usage:
   bun run src/cli.ts run <objective> [--risk low|medium|high|critical] [--profile local|assisted|unattended]
+                               --memory none|disabled --memory-reason "<why>"
   bun run src/cli.ts resume <run-id>
   bun run src/cli.ts cancel <run-id>
-  bun run src/cli.ts receipt <run-id>
+  bun run src/cli.ts receipt <run-id> --memory none|disabled --memory-reason "<why>"
   bun run src/cli.ts list
   bun run src/cli.ts reconcile
   bun run src/cli.ts models <subcommand>
@@ -52,6 +53,17 @@ async function handleRunnerCommand(
   args: string[],
   runner: Runner,
 ): Promise<void> {
+  /** The CLI cannot spawn the curator subagent, so only explicit no-learning outcomes close here. */
+  function memoryDecision(): { decision: 'none' | 'disabled'; rationale: string } {
+    const decision = getFlag(args, '--memory')
+    const rationale = getFlag(args, '--memory-reason')?.trim()
+    if (decision !== 'none' && decision !== 'disabled') {
+      fail('Provide --memory none|disabled and --memory-reason "<why>". Curated learning must run through supervisor_generate_receipt in OpenCode so memory-curator can inspect evidence and submit a proposal.')
+    }
+    if (!rationale) fail('Provide --memory-reason "<why>" so the learning decision is auditable.')
+    return { decision, rationale }
+  }
+
   switch (command) {
     case 'run': {
       const objectiveIndex = args.indexOf('run') + 1
@@ -64,6 +76,7 @@ async function handleRunnerCommand(
       const riskClass = getFlag(args, '--risk') ?? 'medium'
       const profile = getFlag(args, '--profile') ?? 'assisted'
       const dataClass = getFlag(args, '--data-class') ?? 'internal'
+      const memory = memoryDecision()
 
       console.log(`Creating run with profile: ${profile}, risk: ${riskClass}`)
 
@@ -95,7 +108,7 @@ async function handleRunnerCommand(
         console.log(`Error: ${result.error}`)
       }
 
-      const receiptPath = await runner.generateRunReceipt(runId)
+      const receiptPath = await runner.generateRunReceipt(runId, { decision: memory })
       console.log(`Receipt written: ${receiptPath}`)
 
       break
@@ -134,7 +147,7 @@ async function handleRunnerCommand(
         process.exit(1)
       }
 
-      const receiptPath = await runner.generateRunReceipt(runId)
+      const receiptPath = await runner.generateRunReceipt(runId, { decision: memoryDecision() })
       console.log(`Receipt written: ${receiptPath}`)
       break
     }

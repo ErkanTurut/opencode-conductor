@@ -1,141 +1,57 @@
 # Conductor RPC
 
-The GUI is a read-only client of the Conductor RPC. The contract is `src/rpc-contract.ts`,
-exported as `opencode-conductor/rpc`; the implementation is `src/rpc/register.ts`.
-
-## Contract shape
-
-```ts
-import { Rpc } from '@opencode/plugin/rpc'
-
-export const ConductorRpc = Rpc.define({
-  id: 'conductor',
-  methods: {
-    runs: {
-      input: { type: 'object', properties: { limit: { type: 'number' } }, additionalProperties: false },
-      output: { type: 'object', additionalProperties: true },
-    },
-    // ...
-  },
-  events: {},
-})
-```
-
-All inputs/outputs use JSON Schema. The TypeScript view types in `src/rpc-contract.ts` describe
-the `data` payloads for the GUI; they are not used for runtime validation.
-
-## Envelope
-
-Every handler returns one of:
-
-```ts
-{ ok: true, data: T }
-{ ok: false, error: { code: string; message: string } }
-```
-
-`code` is a stable string (`invalid_input`, `not_found`, `internal`). The GUI renders the
-message; it never throws on a bad run id or a missing database.
+The contract is `src/rpc-contract.ts`, exported as `opencode-conductor/rpc`. Handlers return
+`{ ok: true, data }` or `{ ok: false, error: { code, message } }`. Calls are scoped to the
+session location. RPC inputs never accept filesystem paths.
 
 ## Methods
 
-| Method | Input | Data |
-| --- | --- | --- |
-| `workspace` | `{}` | `projectRoot`, `projectKey`, `mode`, `ledgerPath`, `runsDir`, `memoryDir`, `trusted`, `policyRestricted`, `counts` |
-| `runs` | `{ limit?: number; cursor?: string; states?: string[] }` | `runs: RunSummary[]`, `nextCursor` |
-| `run` | `{ runId: string }` | summary, contract, budget, plan, tasks, attempts, leases, approvals, eventCount, runDir |
-| `dag` | `{ runId: string }` | nodes, edges, layers, roots, leaves, dangling, cycles, maxDepth, maxDepthBudget |
-| `gates` | `{ runId: string }` | approvals, per-task verification evidence, findings, mergeReady |
-| `refinements` | `{ runId: string }` | state, uncertainties, Q&A, requirementsPath/Markdown, contract, events |
-| `memory` | `{ limit?: number }` | `blocks: MemoryBlockSummary[]`, `total` |
-| `memoryBlock` | `{ label: string; version?: number }` | full block: scope, status, confidence, reviewAfter, source artifacts, content, hash |
-| `routing` | `{ runId?: string }` | fleet assignments, observed routes, cost/usage summary |
-| `timeline` | `{ runId: string; afterSequence?: number; limit?: number }` | events, `lastSequence`, `truncated` |
+Read methods: `workspace`, `configuration`, `project`, `runs`, `run`, `dag`, `gates`,
+`refinements`, `memory`, `memoryBlock`, `routing`, and `timeline`.
 
-The exact TypeScript shapes are exported from `src/rpc-contract.ts`.
+Configuration methods (the only GUI write surface):
 
-## Location scoping
+| Method | Input purpose | Effect |
+|---|---|---|
+| `agentDocument` | Agent ID and `project`/`global` scope | Read allowlisted fields, target, revision and warnings. |
+| `saveAgentConfiguration` | Agent ID/scope, expected revision, edited fields | Revision-checked update to fixed native Markdown target. |
+| `projectSettings` | Empty input | Read `.opencode/conductor.json` operational settings and revision. |
+| `saveProjectSettings` | Expected revision and settings | Revision-checked update to fixed project settings target. |
 
-The Desktop app's server has a global plugin instance and per-session instances. An RPC call
-without a location reads the global instance:
+Writes validate fields, use fixed targets, reject symlinked paths, and fail on revision conflict.
+Agent writes preserve unrelated frontmatter and prompt body; project writes preserve unrelated
+JSON keys. Global edits require GUI confirmation. Host permission authority and trust are not
+weakened by these writes. A write response confirms the file save only; host reload/application
+must be verified separately. No arbitrary path or remote-action RPC exists.
 
-```ts
-// wrong: reads /Users/<you>'s global ledger, usually empty
-await rpc().runs({ limit: 50 })
-```
+`configuration` reflects host-resolved allowlisted values when available; arbitrary native
+system text is withheld from this snapshot. `agentDocument` is the specific editor read surface.
+Native OpenCode Markdown and JSON/JSONC precedence remains in force.
 
-Every call must name the session directory:
+Project settings hold branches, verification commands, preview awareness, and memory enabled
+state. Preview discovery is local configuration awareness only, not a deployment/provider
+verification. `supervisor_init_run` returns project context including branch/verification
+settings, preview hints, memory directory and memory-enabled status.
 
-```ts
-const location = () => ({ directory: props.session.directory })
+## Session location
 
-const runs = await rpc().runs({ limit: 50 }, { location: location() })
-```
+Every GUI call must include `{ location: { directory: props.session.directory } }`; without it,
+the global plugin instance may return the wrong project. The server resolves the project and
+fixed configuration targets itself.
 
-The client serializes it as `location[directory]`. The server resolves the plugin instance for
-that directory. This is why the same method can return 98 runs for a project and zero for the
-global location.
+## Closeout tools and memory decision
 
-## Server registration
+`supervisor_generate_receipt` requires `memory_decision` with `decision: none|curate` and a
+bounded rationale for each run, including failed/cancelled runs. If project memory is explicitly
+disabled it records `disabled`. A `curate` decision requires a memory-curator handoff and then a
+`curator_proposal` containing `label`, `content`, `source_artifacts`, and optional
+`expected_version`, or `curator_no_learning` explaining why no lesson was found. The curator
+must inspect relevant artifacts; do not invent lessons or personal details. Proposal artifacts
+must be confined to the run; sensitive or personal data is refused. Accepted blocks are
+immutable, versioned, proposed project memory and are not auto-promoted.
 
-`src/rpc/register.ts`:
+## Release and verification
 
-```ts
-export async function registerConductorRpc(ctx, options) {
-  const register = ctx?.rpc?.register
-  if (typeof register !== 'function') return false
-
-  const reader = new LedgerReader(options.layout.ledgerPath)
-  await register(ConductorRpc, {
-    runs: async (input) => {
-      // narrow input, read, return an envelope
-    },
-    // ...
-  })
-  return true
-}
-```
-
-The options close over `projectRoot`, `StateLayout`, trust, policy, and `assetsDir`. The
-handlers never read `process.env` and never accept a path. Registration is feature-detected and
-failure-tolerant: a host before 2.2 logs a warning and keeps the tools.
-
-## Adding a method
-
-1. **Contract** — add the method to `ConductorRpc.methods` with input/output JSON Schema; add
-   the view types to `src/rpc-contract.ts`.
-2. **Source** — add a read-only reader in `src/read/ledger-reader.ts` (SQLite) or
-   `src/read/artifacts.ts` (files). Never write.
-3. **Projection** — add a pure builder in `src/read/projections.ts`. It must tolerate missing
-   rows, malformed JSON, dangling ids, cycles, and legacy states.
-4. **Handler** — add a guarded handler in `src/rpc/register.ts`. Return `invalid_input` or
-   `not_found` as envelopes; wrap unexpected failures in `internal`.
-5. **Tests** — `tests/read/*` for the source/projection, `tests/rpc/register.test.ts` for the
-   handler/envelope. Use temporary ledgers, never live state.
-6. **GUI** — call it with the session location and render loading/empty/error states.
-7. **Verify** — `bun test`, `bun run typecheck`, GUI typecheck, `bun run gui:build`,
-   `bun run smoke:gui`.
-
-## Testing the endpoint directly
-
-The HTTP endpoint is `POST /api/rpc/{rpcID}/{method}` with the body wrapped as `{ input }` and
-the location as `location[directory]`:
-
-```sh
-PASSWORD=$(python3 -c "import json;print(json.load(open('$HOME/.config/opencode/service.json'))['password'])")
-curl -u "opencode:$PASSWORD" -X POST \
-  'http://127.0.0.1:49374/api/rpc/conductor/runs?location%5Bdirectory%5D=%2Fpath%2Fto%2Fproject' \
-  -H 'Content-Type: application/json' \
-  -d '{"input":{"limit":5}}'
-```
-
-The response is `{ "output": { "ok": true, "data": ... } }`. Use this for read-only diagnostics;
-do not call write methods while a run is active.
-
-## Security
-
-- Inputs are ids, labels, and pagination only. No paths.
-- Reads are confined to the resolved `StateLayout`; the artifact reader rejects `..`, absolute
-  paths, and symlink escapes.
-- The SQLite reader opens `readonly: true`, skips migrations, and does not create the file.
-- The GUI never imports server code; it has no filesystem or database access.
-- The RPC is read-only in 1.0.x. Approvals and retries remain server tools, not GUI actions.
+v1.1.0 contract, guard, conflict, path-confinement, and live configuration RPC checks passed.
+Manual Desktop click-through was not performed. These descriptions are not proof that a
+provider deployment or remote merge occurred. See [ARCHITECTURE.md](ARCHITECTURE.md).

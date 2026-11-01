@@ -75,12 +75,18 @@ import {
   resolveStateLayout,
   type StateLayout,
 } from './runtime/state-layout'
+import { collectWorkspaceChanges, validateChangedFiles, validateWorkspaceBinding } from './ledger/scope'
+
 export { canonicalLedgerKey } from './runtime/state-layout'
 // P4: package-manager-aware worktree bootstrap and the branch-aware push rule.
 // Placed after the baseline-pinned import block on purpose: the package's tsc
 // baseline records diagnostics by line, so nothing may shift lines 26-60.
 import { bootstrapCommand, isPushAllowed } from './runtime/bootstrap'
 import { detectProject } from './runtime/detect'
+import { recordMemoryDecision, persistCuratorProposal } from './runtime/closeout'
+import { loadProjectSettings } from './runtime/configuration-store'
+import { discoverPreview } from './runtime/preview'
+import { safeWriteArtifact, readOptionalArtifact } from './runtime/safe-write'
 
 /**
  * Bun shell tag (`$` from 'bun'). Kept loose on purpose: the tag is injected in
@@ -185,6 +191,9 @@ export interface ResolveSupervisorConfigInput {
   ctxOptions?: unknown
   /** Runtime `ctx.location.directory` — unconfirmed shape, read opportunistically. */
   locationDirectory?: string | null
+  /** Read-only project detection fallbacks; explicit options and env still win. */
+  detectedBranches?: { dev: string; main: string }
+  detectedVerifyProfile?: string[]
   env?: Record<string, string | undefined>
   cwd?: string
 }
@@ -246,15 +255,16 @@ function resolveBranches(
   options: SupervisorOptions,
   ctxOptions: SupervisorOptions | null,
   env: Record<string, string | undefined>,
+  detected?: { dev: string; main: string },
 ): { dev: string; main: string } {
   const fromEnv = parseListEnv(env[SUPERVISOR_BRANCHES_ENV_VAR])
   return {
     dev:
       firstNonEmpty(options.branches?.dev, ctxOptions?.branches?.dev, fromEnv[0]) ??
-      DEFAULT_BRANCHES.dev,
+      detected?.dev ?? DEFAULT_BRANCHES.dev,
     main:
       firstNonEmpty(options.branches?.main, ctxOptions?.branches?.main, fromEnv[1]) ??
-      DEFAULT_BRANCHES.main,
+      detected?.main ?? DEFAULT_BRANCHES.main,
   }
 }
 
@@ -352,11 +362,12 @@ export function resolveSupervisorConfig(
     stateLayout: layout,
     runsDir,
     shellRules,
-    branches: resolveBranches(options, ctxOptions, env),
+    branches: resolveBranches(options, ctxOptions, env, input.detectedBranches),
     verifyProfile: resolveList(
       options.verifyProfile,
       ctxOptions?.verifyProfile,
       env[SUPERVISOR_VERIFY_PROFILE_ENV_VAR],
+      input.detectedVerifyProfile,
     ),
     allowedCommands: resolveList(options.allowedCommands, ctxOptions?.allowedCommands),
     namespace: options.namespace ?? ctxOptions?.namespace ?? false,
@@ -1390,12 +1401,12 @@ async function writeRunProjection(
   ledger: SqliteLedger,
   projection: ViewProjectionStore | null = null,
 ): Promise<void> {
+  if (!/^[A-Za-z0-9_-]+$/.test(runId)) throw new Error('invalid_run_id')
   const runDir = `${runsDir}/${runId}`
-  mkdirSync(runDir, { recursive: true })
   const run = await ledger.getRun(runId)
   const workItems = await ledger.listWorkItems(runId)
   const view = buildRunView(runId, run, workItems)
-  await Bun.write(`${runDir}/run.json`, JSON.stringify(view, null, 2))
+  safeWriteArtifact(`${runDir}/run.json`, JSON.stringify(view, null, 2))
   if (projection) {
     // Cache only, and never fatal: SQLite already holds the truth.
     try {
@@ -1407,9 +1418,9 @@ async function writeRunProjection(
 }
 
 async function writeTaskProjection(runsDir: string, task: any): Promise<void> {
+  if (!/^[A-Za-z0-9_-]+$/.test(task.run_id) || !/^[A-Za-z0-9_-]+$/.test(task.id)) throw new Error('invalid_task_id')
   const taskDir = `${runsDir}/${task.run_id}/tasks/${task.id}`
-  mkdirSync(taskDir, { recursive: true })
-  await Bun.write(
+  safeWriteArtifact(
     `${taskDir}/task.json`,
     JSON.stringify(
       {
@@ -1533,6 +1544,16 @@ export function registerSupervisorTools(
       additionalProperties: false,
     },
     async execute(args: any) {
+      let projectContext: Record<string, unknown>
+      try {
+        const settings = loadProjectSettings(repoRoot)
+        projectContext = {
+          branches: runtime.branches, verificationCommands: runtime.verifyProfile,
+          preview: discoverPreview(repoRoot, runtime.branches.dev, settings),
+          memoryDir: runtime.stateLayout?.memoryDir ?? `${repoRoot}/.opencode/memory`,
+          memoryEnabled: settings?.memory.enabled ?? true,
+        }
+      } catch (error) { return asContent({ error: 'project_settings_invalid', detail: String(error) }) }
       const runId = `run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
       await $`mkdir -p ${runsDir}/${runId}`.quiet()
 
@@ -1573,7 +1594,7 @@ export function registerSupervisorTools(
         args.uncertainties && args.uncertainties.length > 0
           ? 'awaiting_refinement'
           : 'intake'
-      return asContent({ run_id: runId, state })
+      return asContent({ run_id: runId, state, projectContext })
     },
   })
 
@@ -1891,40 +1912,29 @@ export function registerSupervisorTools(
         })
       }
 
-      const attemptId = `att-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
-      const result = await ledger.transaction(async (tx) => {
-        const claim = await tx.claimLease({
-          workItemId: args.task_id,
-          leaseOwner: args.lease_owner,
-          leaseExpiresAt: new Date(
-            Date.now() + (args.lease_ms ?? 1200000),
-          ).toISOString(),
-        })
-        if (!claim.claimed) return { claimed: false, fencingToken: -1 }
+      let workspaceId: string | null = null
+      let baseSha = args.base_sha
+      if (isMutatingRole(item.owner_role)) {
+        workspaceId = canonicalWorktreeId(item.id)
+        const workspace = await ledger.getWorkspace(workspaceId)
+        if (!workspace || (args.workspace_id != null && args.workspace_id !== workspaceId) ||
+            !(await validateWorkspaceBinding(repoRoot, workspace, workspaceId, canonicalWorktreeBranch(item.id), true))) {
+          return asContent({ claimed: false, error: 'Authoritative task workspace binding unavailable' })
+        }
+        // Ignore the caller's base. The ledger record has been checked against
+        // actual main and worktree HEADs and the canonical task branch.
+        baseSha = workspace.base_sha
+      }
 
-        await tx.incrementWorkItemAttempts(args.task_id)
-        await tx.transitionWorkItemState(args.task_id, 'running')
-        await tx.createAttempt({
-          id: attemptId,
-          workItemId: args.task_id,
-          attemptNo: item.attempts + 1,
-          harness,
-          modelProvider: args.model_provider ?? 'deepseek',
-          modelId: args.model_id,
-          modelVariant: null,
-          workspaceId: args.workspace_id ?? null,
-          baseSha: args.base_sha,
-        })
-        await tx.appendEvent({
-          runId: args.run_id,
-          workItemId: args.task_id,
-          attemptId,
-          eventType: 'lease_claimed',
-          actor: args.lease_owner,
-          payloadJson: JSON.stringify({ fencingToken: claim.fencingToken }),
-        })
-        return { claimed: true, fencingToken: claim.fencingToken }
-      })
+      const attemptId = `att-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+      const result = ledger.claimTaskAtomic ? await ledger.claimTaskAtomic({
+        runId: args.run_id, workItemId: args.task_id, leaseOwner: args.lease_owner,
+        leaseExpiresAt: new Date(Date.now() + (args.lease_ms ?? 1200000)).toISOString(),
+        attempt: { id: attemptId, workItemId: args.task_id, harness,
+          modelProvider: args.model_provider ?? 'deepseek', modelId: args.model_id,
+          modelVariant: null, workspaceId, baseSha },
+      }) : { claimed: false, fencingToken: -1, error: 'Atomic admission unavailable' }
+
 
       return asContent({
         ...result,
@@ -2187,8 +2197,10 @@ export function registerSupervisorTools(
     },
     async execute(args: any) {
       const lease = await ledger.getLease(args.task_id)
-      if (!lease || lease.fencing_token !== args.fencing_token || lease.released_at) {
-        return asContent({ recorded: false, error: 'Stale fencing token' })
+      const attempt = await ledger.getAttempt(args.attempt_id)
+      const task = await ledger.getWorkItem(args.task_id)
+      if (!ledger.finishTaskAtomic || !lease || lease.fencing_token !== args.fencing_token || lease.released_at || !lease.lease_expires_at || Date.parse(lease.lease_expires_at) <= Date.now() || !attempt || attempt.work_item_id !== args.task_id || attempt.state !== 'pending' || !task || task.run_id !== args.run_id || task.attempts !== attempt.attempt_no) {
+        return asContent({ recorded: false, error: 'Stale attempt or fencing token' })
       }
 
       // Independent verification gate: re-run the task's declared
@@ -2201,20 +2213,19 @@ export function registerSupervisorTools(
       const item = await ledger.getWorkItem(args.task_id)
       const role = item?.owner_role ?? null
       const mutating = isMutatingRole(role)
-      let verificationCommands = []
+      let verificationCommands: string[] = []
+      let invalidProfile = false
       try {
-        verificationCommands = JSON.parse(
-          item?.verification_commands_json ?? '[]',
-        )
-      } catch {
-        verificationCommands = []
-      }
+        const parsed = JSON.parse(item?.verification_commands_json ?? 'null')
+        if (!Array.isArray(parsed) || parsed.some((x: unknown) => typeof x !== 'string' || !x.trim())) invalidProfile = true
+        else verificationCommands = parsed
+      } catch { invalidProfile = true }
 
       // Resolve the task worktree (mutating tasks use `wt-<task>`); fall
       // back to the repo root when no workspace is recorded OR when the
       // recorded path no longer exists on disk (missed worktree cleanup
       // would otherwise make `.cwd()` throw and leak the lease).
-      const workspace = await ledger.getWorkspace(`wt-${args.task_id}`)
+      const workspace = await ledger.getWorkspace(attempt.workspace_id ?? `wt-${args.task_id}`)
       const recordedWorktree = workspace?.path
       const worktreePath =
         recordedWorktree && existsSync(recordedWorktree)
@@ -2234,9 +2245,12 @@ export function registerSupervisorTools(
       // That double-run is intentional (independent re-check) and is the
       // reason the verification row is upserted on a stable id.
       let verificationResults: any[] = []
-      let verificationError = null
-      const verificationSkipped = !mutating && verificationCommands.length === 0
-      if (verificationCommands.length > 0) {
+      const workspaceBound = !mutating || !!workspace && attempt.workspace_id === canonicalWorktreeId(args.task_id) && attempt.base_sha === workspace.base_sha && await validateWorkspaceBinding(repoRoot, workspace, canonicalWorktreeId(args.task_id), canonicalWorktreeBranch(args.task_id), false)
+      let verificationError: string | null = mutating && (!recordedWorktree || !existsSync(recordedWorktree) || !workspaceBound)
+        ? 'isolated task workspace unavailable'
+        : null
+      const verificationSkipped = !invalidProfile && !mutating && verificationCommands.length === 0
+      if (verificationCommands.length > 0 && verificationError === null) {
         try {
           verificationResults = await runVerification(
             verificationCommands,
@@ -2273,68 +2287,60 @@ export function registerSupervisorTools(
       const allPassed =
         verificationError === null &&
         (verificationCommands.length > 0
-          ? verificationResults.every((r) => r.passed)
+          ? verificationResults.length === verificationCommands.length && verificationResults.every((r) => r.passed)
           : verificationSkipped)
       const failureClass = allPassed
         ? null
         : verificationError !== null
-          ? 'verification_error'
+          ? (/timed?\s*out|timeout/i.test(verificationError) ? 'infrastructure_timeout' : 'verification_error')
           : verificationCommands.length === 0
-            ? mutating
+            ? mutating || invalidProfile
               ? 'no_verification_commands'
               : 'exit_nonzero'
-            : (args.failure_class ?? 'verification_failed')
-      const completed = args.exit_code === 0 && allPassed
+            : (verificationResults.some((r) => r.exitCode === 124) ? 'infrastructure_timeout_or_exit_124' : (args.failure_class ?? 'verification_failed'))
+      let scopeError: string | null = null
+      let changedFiles: string[] = []
+      if (mutating && verificationError === null) {
+        try {
+          changedFiles = await collectWorkspaceChanges(worktreePath, attempt.base_sha)
+          const writeScopes = JSON.parse(item?.write_scope_json ?? 'null')
+          const allowedPaths = JSON.parse(item?.allowed_paths_json ?? 'null')
+          if (!Array.isArray(writeScopes) || !Array.isArray(allowedPaths)) throw new Error('invalid scopes')
+          scopeError = validateChangedFiles(worktreePath, changedFiles, writeScopes, allowedPaths)
+        } catch { scopeError = 'scope_evidence_unavailable' }
+      } else if (mutating) scopeError = 'scope_evidence_unavailable'
+      const completed = args.exit_code === 0 && allPassed && !scopeError
+      const finalFailureClass = scopeError ?? failureClass
 
       const evidence = JSON.stringify({
         attempt_id: args.attempt_id,
         task_id: args.task_id,
         exit_code: args.exit_code,
-        changed_files: args.changed_files ?? [],
+        changed_files: changedFiles,
+        scope_enforcement: mutating ? (scopeError ?? 'checked') : 'not_applicable',
         verification_results: verificationResults,
-        all_checks_passed: allPassed,
+        all_checks_passed: allPassed && !scopeError,
         verification_skipped: verificationSkipped,
-        failure_class: failureClass,
+        failure_class: finalFailureClass,
         verification_error: verificationError,
         collected_at: new Date().toISOString(),
       })
 
-      try {
-        if (completed) {
-          await ledger.completeAttempt(
-            args.attempt_id,
-            args.exit_code,
-            args.usage_tokens == null
-              ? null
-              : JSON.stringify({ total_tokens: args.usage_tokens }),
-            null,
-            null,
-            evidence,
-          )
-          await ledger.transitionWorkItemState(args.task_id, 'completed')
-        } else {
-          await ledger.failAttempt(
-            args.attempt_id,
-            failureClass ?? 'exit_nonzero',
-            args.exit_code,
-            args.usage_tokens == null
-              ? null
-              : JSON.stringify({ total_tokens: args.usage_tokens }),
-            evidence,
-          )
-          await ledger.transitionWorkItemState(args.task_id, 'failed')
-        }
-        await writeRunProjection(runsDir, args.run_id, ledger, projection)
-      } finally {
-        // Always release the fencing-token lease — a thrown verification
-        // or recording step must never strand it until expiry.
-        await ledger.releaseLease(args.task_id, args.fencing_token)
-      }
+      const recorded = await ledger.finishTaskAtomic!({
+        runId: args.run_id, workItemId: args.task_id, attemptId: args.attempt_id,
+        fencingToken: args.fencing_token, success: completed, exitCode: args.exit_code,
+        failureClass: finalFailureClass ?? 'exit_nonzero',
+        usageJson: args.usage_tokens == null ? null : JSON.stringify({ total_tokens: args.usage_tokens }),
+        evidenceJson: evidence,
+      })
+      if (!recorded) return asContent({ recorded: false, error: 'Stale attempt or fencing token' })
+      await writeRunProjection(runsDir, args.run_id, ledger, projection)
+
       return asContent({
         recorded: true,
         task_id: args.task_id,
-        all_passed: allPassed,
-        failure_class: failureClass,
+        all_passed: allPassed && !scopeError,
+        failure_class: finalFailureClass,
       })
     },
   })
@@ -2461,7 +2467,8 @@ export function registerSupervisorTools(
             shellDeniedRefusal(bootstrap.command, installDecision.reason),
           )
         }
-        const baseSha = args.base_sha ?? (await worktrees.resolveBaseSha())
+        const baseSha = await worktrees.resolveBaseSha()
+        if (args.base_sha != null && args.base_sha !== baseSha) return asContent({ created: false, error: 'Requested base does not match current main checkout HEAD' })
         const created = await worktrees.createWorktree(
           workspaceId,
           canonicalWorktreeBranch(args.task_id),
@@ -2520,19 +2527,50 @@ export function registerSupervisorTools(
     description: 'Write the durable run receipt without inventing a completed state.',
     input: {
       type: 'object',
-      properties: { run_id: { type: 'string' } },
+      properties: {
+        run_id: { type: 'string' },
+        memory_decision: { type: 'object', properties: { decision: { enum: ['none', 'curate', 'disabled'] }, rationale: { type: 'string', maxLength: 1000 } }, required: ['decision', 'rationale'], additionalProperties: false },
+        curator_no_learning: { type: 'string', minLength: 1, maxLength: 1000 },
+        curator_proposal: { type: 'object', properties: { label: { type: 'string' }, content: { type: 'string', maxLength: 5000 }, source_artifacts: { type: 'array', items: { type: 'string' }, maxItems: 10 }, expected_version: { type: 'integer', minimum: 0 } }, required: ['label', 'content', 'source_artifacts'], additionalProperties: false },
+      },
       required: ['run_id'],
       additionalProperties: false,
     },
     async execute(args: any) {
+      if (typeof args.run_id !== 'string' || !/^[A-Za-z0-9_-]+$/.test(args.run_id)) return asContent({ refused: true, error: 'invalid_run_id' })
+      if (!await ledger.getRun(args.run_id)) return asContent({ refused: true, error: 'run_not_found' })
       const receipt = await generateReceipt(args.run_id, ledger)
       const runDir = `${runsDir}/${args.run_id}`
-      await $`mkdir -p ${runDir}`.quiet()
+      const memoryEnabled = loadProjectSettings(repoRoot)?.memory.enabled ?? true
+      const storedDecision = readOptionalArtifact(`${runDir}/memory-decision.json`)
+      const priorDecision = storedDecision ? JSON.parse(storedDecision) : null
+      const decision = args.memory_decision ?? priorDecision ?? (!memoryEnabled
+        ? { decision: 'disabled', rationale: 'Memory learning is disabled by explicit project settings.' } : args.memory_decision
+      )
+      if (decision?.decision === 'disabled' && memoryEnabled) return asContent({ refused: true, error: 'memory_not_disabled_in_project_settings' })
+      if (!memoryEnabled && decision?.decision === 'curate') return asContent({ refused: true, error: 'memory_disabled_by_project_settings' })
+      const recorded = recordMemoryDecision(runDir, args.run_id, decision)
+      if (!recorded.ok) return asContent({ refused: true, ...recorded })
+      if (args.curator_no_learning !== undefined && (typeof args.curator_no_learning !== 'string' || !args.curator_no_learning.trim() || args.curator_no_learning.length > 1000 || !recorded.handoff || args.curator_proposal)) return asContent({ refused: true, error: 'invalid_curator_result' })
+      if (recorded.handoff && !args.curator_proposal && !args.curator_no_learning) return asContent({ closeout: 'handoff_required', run_id: args.run_id,
+        memory_dir: runtime.stateLayout?.memoryDir ?? `${repoRoot}/.opencode/memory`, artifacts_dir: `${runDir}/artifacts`,
+        message: 'Spawn memory-curator to inspect this run’s relevant artifacts and existing project memory. Return a bounded evidence-linked proposal, then repeat this call with the same decision and curator_proposal. No final receipt has been written.' })
+      let memoryPath: string | undefined
+      if (args.curator_proposal) {
+        if (!recorded.handoff) return asContent({ refused: true, error: 'proposal_without_curator_decision' })
+        const saved = persistCuratorProposal(runtime.stateLayout?.memoryDir ?? `${repoRoot}/.opencode/memory`, runDir, args.run_id, args.curator_proposal)
+        if (!saved.ok) return asContent({ refused: true, ...saved })
+        memoryPath = saved.path
+      }
+      if (args.curator_no_learning) safeWriteArtifact(`${runDir}/curator-review.json`, JSON.stringify({ run_id: args.run_id, outcome: 'no_learning', rationale: args.curator_no_learning }, null, 2))
       const receiptPath = `${runDir}/receipt.md`
       await writeReceiptToDisk(receipt, receiptPath)
+      await ledger.appendEvent({ runId: args.run_id, eventType: 'memory_review_completed', actor: 'conductor', payloadJson: JSON.stringify({ decision: decision.decision, outcome: memoryPath ? 'proposal_persisted' : args.curator_no_learning ? 'curated_no_learning' : decision.decision, path: memoryPath ?? null }) })
       await writeRunProjection(runsDir, args.run_id, ledger, projection)
       return asContent({
         receipt_path: receiptPath,
+        memory_outcome: memoryPath ? 'proposal_persisted' : args.curator_no_learning ? 'curated_no_learning' : decision?.decision,
+        memory_path: memoryPath,
         state: receipt.state,
         total_attempts: receipt.totalAttempts,
         repair_rounds: receipt.repairRounds,
@@ -2938,22 +2976,6 @@ function blockedCommandError(command: string, code?: string): Error {
 }
 
 /**
- * True when the runtime hands a recorded human approval to this event. Gate
- * approvals are recorded in the ledger by the host; it may surface the push
- * approval either as `approval: true` or `approval: { approved: true }`. Absent
- * it, a trunk-based (`dev === main`) push is refused.
- */
-function hasPushApproval(event: any): boolean {
-  const approval = event?.approval
-  if (approval === true) return true
-  return (
-    typeof approval === 'object' &&
-    approval !== null &&
-    approval.approved === true
-  )
-}
-
-/**
  * The `execute.before` guard: secret-file reads and dangerous shell commands are
  * refused before the tool runs. The only permitted push is a non-force
  * `git push ... origin <dev branch>` (the human-approved flow); every other
@@ -2983,7 +3005,7 @@ export function supervisorExecuteBeforeGuard(
     const push = isPushAllowed(
       command,
       { dev: devBranch, main: mainBranch },
-      { approved: hasPushApproval(event) },
+      { approved: false },
     )
     if (
       !push.allowed ||

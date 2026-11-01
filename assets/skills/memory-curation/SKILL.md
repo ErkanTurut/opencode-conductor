@@ -15,8 +15,8 @@ Extract durable, non-sensitive lessons from completed runs and propose bounded m
 
 1. Review run receipt, evidence, and review findings.
 2. Identify recurring patterns: failures, successes, useful techniques.
-3. Write proposed memory block with provenance metadata.
-4. Submit for review (human or automated gate).
+3. Return one bounded `curator_proposal`: `{label, content, source_artifacts}`. Sources must be existing paths relative to the run directory under `artifacts/`; content is at most 5,000 characters. Explain the lesson, its evidence and when it does not apply. Do not include secrets or personal data.
+4. The conductor submits this through `supervisor_generate_receipt` with its existing `curate` decision. The server writes an immutable project-scoped proposed block with hash, source run, review date and provenance. No direct memory write or fabricated active approval is required.
 
 ## Block Format
 

@@ -79,14 +79,14 @@ Then follow this pipeline:
 1. **Intake** — Call `supervisor_init_run` with the objective and risk class. Judge whether the request is **well-defined**:
    - **Well-defined** (explicit objective, verifiable success criteria, known scope) → proceed to discovery.
    - **Under-specified** (vague goal, no success criteria, conflicting or missing scope) → call `supervisor_request_refinement` with the uncertainties, then delegate to the `requirements-refiner` subagent — it interviews the user and writes the contract. Record the result with `supervisor_record_requirements` before proceeding. **Never invent a definition of done.**
-2. **Discover** — Delegate to `scout` (repo structure) and `external-scout` (docs) as read-only subagents
+2. **Discover** — Read the returned `projectContext` (effective branches, checks, preview awareness and memory location), consult relevant existing project memory, then delegate to `scout` (repo structure) and `external-scout` (docs) as read-only subagents. Verify memory advice against current evidence; proposed or stale lessons are not authority.
 3. **Plan** — Delegate to `architect` to produce task DAG, then call `supervisor_create_task` for each planned task
 4. **Execute** — Claim each task with `supervisor_claim_task`, create a worktree for mutating tasks, delegate to `coder` or `test-engineer`, bootstrap dependencies in the worktree, verify, and record evidence with the fencing token
 5. **Review** — Delegate to `critic` (different model family) for diff review, `security-critic` for auth/infra
 6. **Repair** — Max 3 rounds. Fix findings, re-verify, re-review. Stop on repeated failure.
 7. **Integrate** — Delegate to `integrator` in the integration worktree to merge approved task branches into `supervisor/run-<run_id>/integration`, then run full verification
-8. **Finalize (human-gated git flow)** — Ask for merge approval with `question`. Only after explicit approval: at the repo root (checked out on `develop`), merge the integration branch into `develop`, run `git push origin develop`, then `gh pr create --base main --head develop` with a generated title/body. Never merge the PR yourself — the human merges `develop` → `main` on GitHub.
-9. **Closeout** — Call `supervisor_generate_receipt`, `supervisor_worktree(action: "cleanup")`
+8. **Finalize (human-gated git flow)** — Discover the project's development branch, preview deployment and main branch. Ask before merging the integration worktree into development and pushing it. After the push, verify the deployment for the pushed commit and present its preview URL for final user verification before opening the PR to main. If preview is absent, propose setup; if unavailable or failed, report that and do not claim verification passed. Never merge the PR yourself.
+9. **Closeout** — Before closing or cleaning up, explicitly decide whether this run produced durable, evidence-backed project learning. Call `supervisor_generate_receipt` with `memory_decision: {decision: "none"|"curate", rationale}`. For `curate`, the tool returns a handoff instead of a final receipt. Spawn `memory-curator` with the run ID, relevant artifact paths and resolved project memory location; wait for its result. Repeat the receipt call with the same decision plus its bounded `curator_proposal`. Report the actual persisted path or blocker, never claim a handoff alone enriched memory. Only then clean up safely.
 
 ## Rules
 
@@ -96,7 +96,7 @@ Then follow this pipeline:
 - Call `supervisor_verify` yourself — never trust agent self-reported results.
 - Critic receives diff + contract, not implementer's reasoning.
 - Max 3 repair rounds. Escalate to human, don't loop.
-- Git flow is strictly scoped: the only push is `git push origin develop`, and only after explicit human merge approval via `question`. Merge the integration branch into `develop` at the repo root first, push, then create the `develop` → `main` PR with `gh pr create --base main --head develop` and stop — the human merges the PR. Never push `main`, never force-push (permissions and the supervisor plugin hook enforce this). If a `develop` → `main` PR already exists, report its URL instead of creating a duplicate.
+- Git flow is human-gated: ask before merging and pushing the configured development branch; never force-push or push main. Verify the pushed commit's preview and obtain final user verification before creating a development-to-main PR. Reuse an existing PR instead of creating a duplicate. Existing permissions and guards remain authoritative; do not bypass a denial.
 - Use `supervisor_get_status` to check progress between stages.
 - Run artifacts go ONLY under `.opencode/runs/<run_id>/artifacts/` — never a repo-root `artifacts/`; scope agent writes to enforce it.
 - Verification profiles must include `bun run build` for any task touching module/import graphs — and on all waves before integration. Vitest-green is not sufficient (import-protection/handler-extraction regressions).

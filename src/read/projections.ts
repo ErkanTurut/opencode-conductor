@@ -659,6 +659,10 @@ export function buildGates(input: GatesInput): GatesData {
     const blockingOpen = (findingsByTask.get(task.id) ?? []).filter(
       (finding) => finding.blocking && isOpenFinding(finding),
     ).length
+    const requiredCommands = [...task.verificationCommands]
+    const missingCommands = requiredCommands.filter(command =>
+      !verifications.some(verification => verification.command === command && verification.passed),
+    )
     return {
       taskId: task.id,
       title: task.title,
@@ -669,10 +673,12 @@ export function buildGates(input: GatesInput): GatesData {
       findings,
       blockingFindings: blockingOpen,
       openFindings: (findingsByTask.get(task.id) ?? []).filter(isOpenFinding).length,
+      requiredCommands,
+      missingCommands,
       passed:
         verifications.length === 0
           ? null
-          : verifications.every((verification) => verification.passed),
+          : missingCommands.length === 0 && verifications.every((verification) => verification.passed),
     }
   })
 
@@ -680,6 +686,24 @@ export function buildGates(input: GatesInput): GatesData {
   const blockingOpen = input.findings.some(
     (finding) => finding.blocking && isOpenFinding(finding),
   )
+  const evidenceReady = input.tasks.length > 0 && input.tasks.every((task, index) =>
+    task.state === 'completed' && (
+      task.verificationCommands.length > 0
+        ? tasks[index]?.passed === true
+        : task.writeScope.length === 0
+    ),
+  ) && !failedVerification && !blockingOpen
+  const reasons = [
+    ...(input.tasks.length === 0 ? ['No task plan is recorded.'] : []),
+    ...(input.tasks.some(task => task.state !== 'completed') ? ['Not all tasks are completed.'] : []),
+    ...(tasks.some(task => (task.missingCommands?.length ?? 0) > 0 || (task.requiredCommands?.length ?? 0) > 0 && task.passed === null)
+      ? ['Required verification evidence is missing for the latest attempt.'] : []),
+    ...(input.tasks.some(task => task.writeScope.length > 0 && task.verificationCommands.length === 0)
+      ? ['A mutating task has no required verification commands.'] : []),
+    ...(failedVerification ? ['A recorded verification failed or required commands are incomplete.'] : []),
+    ...(blockingOpen ? ['Open blocking review findings remain.'] : []),
+    'Candidate-bound approval, remote protections, and preview readiness are not established by this projection.',
+  ]
   return {
     runId: input.runId,
     approvals: input.approvals.map((approval) => ({
@@ -691,7 +715,10 @@ export function buildGates(input: GatesInput): GatesData {
       expiresAt: approval.expiresAt,
     })),
     tasks,
-    mergeReady: input.tasks.length > 0 && !failedVerification && !blockingOpen,
+    // Legacy clients must not interpret an absence of recorded failures as
+    // authorization. This read model has no authenticated candidate/approval.
+    mergeReady: false,
+    readiness: { evidenceReady, authoritative: false, reasons },
   }
 }
 

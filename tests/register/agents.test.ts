@@ -173,7 +173,7 @@ describe('permission mapping', () => {
 
     const shell = rulesFor(agent.permissions, 'shell')
     expect(shell.length).toBe(2)
-    expect(shell.map((rule) => rule.resource)).toEqual(['git push*', '*'])
+    expect(shell.map((rule) => rule.resource)).toEqual(['*', 'git push*'])
 
     expect(rulesFor(agent.permissions, 'subagent')).toEqual([
       { action: 'subagent', resource: '*', effect: 'deny' },
@@ -189,25 +189,25 @@ describe('permission mapping', () => {
     expect(agent.permissions?.some((rule) => rule.action.startsWith('supervisor_'))).toBe(false)
   })
 
-  it('emits deny, then ask, then allow, keeping file order inside each effect', () => {
+  it('preserves source order for native last-match permission evaluation', () => {
     const rules = ORDERING_PERMISSIONS.permissions ?? []
 
     expect(rules).toEqual([
-      { action: 'read', resource: 'third', effect: 'deny' },
-      { action: 'read', resource: 'second', effect: 'ask' },
       { action: 'read', resource: 'first', effect: 'allow' },
+      { action: 'read', resource: 'second', effect: 'ask' },
+      { action: 'read', resource: 'third', effect: 'deny' },
       // Appended because the fixture declares no env rule.
       { ...ENV_READ_DENY },
     ])
   })
 
-  it('puts a narrow deny before the broad allow of the same action', () => {
+  it('puts narrow read denies after the broad allow of the same action', () => {
     const agent = parseAgentMarkdown('fixture.md', FIXTURE)
 
     expect(rulesFor(agent.permissions, 'read').map((rule) => rule.effect)).toEqual([
-      'deny',
-      'deny',
       'allow',
+      'deny',
+      'deny',
     ])
     expect(rulesFor(agent.permissions, 'edit')).toEqual([
       { action: 'edit', resource: '*', effect: 'deny' },
@@ -308,16 +308,16 @@ describe('the real agent roster', () => {
     }
   })
 
-  it('maps the coder bash block to shell with the deny first', () => {
+  it('maps the coder bash block to shell with the broad default first', () => {
     const coder = definitions.find((definition) => definition.id === 'coder')
     const shell = rulesFor(coder?.permissions, 'shell')
     expect(shell.length).toBeGreaterThan(1)
-    expect(shell[0].effect).toBe('deny')
-    expect(shell[0].resource).toBe('git push*')
+    expect(shell[0].effect).toBe('allow')
+    expect(shell[0].resource).toBe('*')
     expect(shell[shell.length - 1]).toEqual({
       action: 'shell',
-      resource: '*',
-      effect: 'allow',
+      resource: 'chown*',
+      effect: 'deny',
     })
   })
 

@@ -1,22 +1,25 @@
-import { For, Show, createMemo, createSignal } from 'solid-js'
+import { For, Index, Show, createEffect, createMemo, createSignal, createUniqueId, onCleanup } from 'solid-js'
 import { usePlugin } from '@opencode/plugin/gui'
-import type { ConfigurationAgent, ConfigurationData } from '../../rpc-contract'
+import type { ConfigurationAgent, ConfigurationData, ConfigurationPermission as PermissionRule } from '../../rpc-contract'
 import { arrayOf, recordOf, textOf } from '../data'
 import { EmptyState, LoadingBlock, Section } from '../components'
-import { serializeAgentDraft, type DraftModel } from '../agent-draft'
+import { validateAgentEditorDocument, updateSkillPermission, type AgentEditorAdapter, type AgentEditorDocument, type ConfigurationScope, type DraftModel } from '../agent-draft'
 
-export interface ConfigurationViewProps { data: ConfigurationData | null; loading: boolean }
+export interface ConfigurationViewProps { data: ConfigurationData | null; loading: boolean; editor?: AgentEditorAdapter; onDirty?: (dirty: boolean) => void }
 
-/** Read-only host-resolved snapshot and packaged defaults, not an editor. */
+/** Host-resolved snapshot and separately loaded native override editor. */
 export function ConfigurationView(props: ConfigurationViewProps) {
   const ctx = usePlugin()
   const [selectedId, setSelectedId] = createSignal<string | null>(null)
+  const [editorDirty, setEditorDirty] = createSignal(false)
+  createEffect(() => props.onDirty?.(editorDirty()))
+  onCleanup(() => props.onDirty?.(false))
   const agents = () => arrayOf<ConfigurationAgent>(props.data?.agents)
   const selected = createMemo(() => agents().find(agent => agent.id === selectedId()) ?? agents()[0] ?? null)
   const source = (agent: ConfigurationAgent, field: string) => textOf(recordOf(agent.sources)[field], 'unknown')
   return <Section title="Configuration">
     <Show when={props.data} fallback={props.loading ? <LoadingBlock label={ctx.t('common.loading')} /> : <EmptyState title="Configuration unavailable" />}>
-      <p class="cdt-muted cdt-meta">Read-only snapshot. Model slots used by tasks are routing roles, not necessarily the actual model used by an attempt.</p>
+      <p class="cdt-muted cdt-meta">Effective snapshot. Model slots used by tasks are routing roles, not necessarily the actual model used by an attempt.</p>
       <p class="cdt-muted cdt-meta">{props.data?.nativeResolved ? 'Native values are resolved by the host; the contributing configuration files are not exposed.' : 'Native resolution unavailable. Packaged defaults are not asserted to be effective host configuration.'}</p>
       <For each={arrayOf<string>(props.data?.warnings)}>{warning => <p class="cdt-inspector-note">{warning}</p>}</For>
       <Show when={agents().length} fallback={<EmptyState title="No agents available" body="No agent configuration was returned." />}>
@@ -36,13 +39,13 @@ export function ConfigurationView(props: ConfigurationViewProps) {
             </tbody></table></div>
             <details class="cdt-inspector-disclosure"><summary>System prompt</summary><pre class="cdt-pre" tabindex="0">{textOf(agent().system, 'Not provided')}</pre></details>
             <details class="cdt-inspector-disclosure"><summary>Permissions JSON</summary><pre class="cdt-pre" tabindex="0">{JSON.stringify(arrayOf(agent().permissions), null, 2)}</pre></details>
-            <Show when={agent().id} keyed>{agentId => <AgentDraft agentId={agentId} models={props.data?.models} />}</Show>
+            <Show when={props.editor} fallback={<p class="cdt-inspector-note">Native configuration editing is unavailable.</p>}>{editor => <AgentEditor agentId={agent().id} editor={editor()} models={props.data?.models} onDirty={setEditorDirty} />}</Show>
           </div>}</Show>
         </div>
       </Show>
       <section class="cdt-section"><h3 class="cdt-heading">Skills</h3><p>{textOf(props.data?.skillPolicy, 'Skill policy unavailable.')}</p></section>
-      <details class="cdt-inspector-disclosure"><summary>Native configuration guide (read-only examples)</summary>
-        <p class="cdt-muted">Examples only; this panel does not save or apply configuration. Replace the placeholder values before using them.</p>
+      <details class="cdt-inspector-disclosure"><summary>Native configuration examples</summary>
+        <p class="cdt-muted">Examples only. Use the editor above to save an override; replace placeholder values when using these examples elsewhere.</p>
         <h4 class="cdt-subheading">Agent Markdown · .opencode/agents/example.md</h4>
         <pre class="cdt-pre" tabindex="0">{`---\ndescription: Example agent\nmode: subagent\nmodel: provider/model#variant\nsteps: 20\n---\nYour system instructions here.`}</pre>
         <h4 class="cdt-subheading">JSONC · opencode.jsonc</h4>
@@ -52,33 +55,84 @@ export function ConfigurationView(props: ConfigurationViewProps) {
   </Section>
 }
 
-/** A keyed local component keeps edits through polling and resets on agent selection. */
-function AgentDraft(props: { agentId: string; models?: DraftModel[] }) {
-  const [model, setModel] = createSignal('')
-  const [variant, setVariant] = createSignal('')
-  const [steps, setSteps] = createSignal('')
-  const [system, setSystem] = createSignal('')
-  const [skillIds, setSkillIds] = createSignal('')
-  const [skillEffect, setSkillEffect] = createSignal<'allow' | 'ask' | 'deny'>('ask')
-  const models = () => arrayOf<DraftModel>(props.models).filter(item => item && typeof item.id === 'string' && typeof item.name === 'string' && Array.isArray(item.variants))
-  const selectedModel = createMemo(() => models().find(item => item.id === model()))
-  const draft = createMemo(() => serializeAgentDraft({ agentId: props.agentId, model: model(), variant: variant(), steps: steps(), system: system(), skillIds: skillIds(), skillEffect: skillEffect() }, models()))
-  const changeModel = (value: string) => { setModel(value); setVariant('') }
-  return <details class="cdt-inspector-disclosure cdt-agent-draft"><summary>Prepare native override</summary>
-    <p class="cdt-inspector-note"><strong>Draft only; not applied, not saved.</strong> Review in native configuration. This is separate from the snapshot above. Selecting another agent discards this draft.</p>
-    <p class="cdt-muted cdt-meta">The snippet contains only the fields entered here. Review existing native configuration and permissions before merging it; replacing them could remove existing settings.</p>
-    <div class="cdt-draft-fields">
-      <Show when={models().length > 0} fallback={<label>Model reference <input type="text" value={model()} placeholder="provider/model" onInput={event => changeModel(event.currentTarget.value)} aria-describedby="cdt-draft-model-help" /><span id="cdt-draft-model-help" class="cdt-muted cdt-meta">Model catalog unavailable. Enter a provider/model reference; its availability cannot be verified here.</span></label>}>
-        <label>Model <select value={model()} onChange={event => changeModel(event.currentTarget.value)}><option value="">Choose a model</option><For each={models()}>{item => <option value={item.id}>{item.name} ({item.id})</option>}</For></select></label>
-      </Show>
-      <label>Effort / variant <select value={variant()} disabled={!selectedModel() || !arrayOf<string>(selectedModel()?.variants).length} onChange={event => setVariant(event.currentTarget.value)}><option value="">No variant override</option><For each={arrayOf<string>(selectedModel()?.variants)}>{item => <option value={item}>{item}</option>}</For></select><span class="cdt-muted cdt-meta">{selectedModel() ? 'Only variants listed for this model are available.' : 'Choose a catalog model to select a supported variant.'}</span></label>
-      <label>Steps <input type="number" min="1" step="1" inputmode="numeric" value={steps()} onInput={event => setSteps(event.currentTarget.value)} /><span class="cdt-muted cdt-meta">Optional positive whole number.</span></label>
-      <label>System prompt <textarea rows="5" value={system()} onInput={event => setSystem(event.currentTarget.value)} /><span class="cdt-muted cdt-meta">Leave blank to omit this field. A non-empty system prompt replaces the provider base prompt for this agent.</span></label>
-      <label>Skill IDs <textarea rows="3" value={skillIds()} onInput={event => setSkillIds(event.currentTarget.value)} /><span class="cdt-muted cdt-meta">One ID per line. These become permission rules; they do not attach or load skills. Rules are ordered; the last matching rule wins.</span></label>
-      <label>Skill permission effect <select value={skillEffect()} onChange={event => setSkillEffect(event.currentTarget.value as 'allow' | 'ask' | 'deny')}><option value="ask">Ask</option><option value="allow">Allow</option><option value="deny">Deny</option></select></label>
-    </div>
-    <Show when={draft().ok} fallback={<div class="cdt-inspector-note" role="status"><strong>Complete the draft to see JSONC.</strong><ul><For each={draft().ok ? [] : (draft() as { ok: false; errors: string[] }).errors}>{error => <li>{error}</li>}</For></ul></div>}>
-      <h4 class="cdt-subheading">JSONC draft for {props.agentId}</h4><pre class="cdt-pre" tabindex="0" aria-label={`JSONC draft for ${props.agentId}`}>{draft().ok ? (draft() as { ok: true; json: string }).json : ''}</pre>
-    </Show>
-  </details>
+/** Drafts are retained by agent and scope while the panel remains mounted. */
+function AgentEditor(props: { agentId: string; editor: AgentEditorAdapter; models?: DraftModel[]; onDirty: (value: boolean) => void }) {
+  const modelListId = `cdt-models-${createUniqueId()}`, variantListId = `cdt-variants-${createUniqueId()}`
+  type Entry = { document: AgentEditorDocument; baseline: string }
+  const [scope, setScope] = createSignal<ConfigurationScope>('project')
+  const [entries, setEntries] = createSignal<Record<string, Entry>>({})
+  const [busy, setBusy] = createSignal(false)
+  const [message, setMessage] = createSignal('')
+  const key = () => `${scope()}:${props.agentId}`
+  const entry = () => entries()[key()]
+  const dirtyEntry = (item: Entry) => JSON.stringify(item.document.values) !== item.baseline
+  const dirty = () => !!entry() && dirtyEntry(entry())
+  createEffect(() => props.onDirty(Object.values(entries()).some(dirtyEntry)))
+  let generation = 0
+  onCleanup(() => { generation++ })
+  async function load() {
+    const id = props.agentId, selectedScope = scope(), selectedKey = key()
+    const prior = entries()[selectedKey]
+    if (prior && dirtyEntry(prior) && !window.confirm('Discard this unsaved draft and reload the target?')) return
+    const request = ++generation
+    setBusy(true); setMessage('')
+    try {
+      const value = await props.editor.load(id, selectedScope)
+      if (request !== generation) return
+      setEntries(old => ({ ...old, [selectedKey]: { document: value, baseline: JSON.stringify(value.values) } }))
+    } catch (error) { if (request === generation) setMessage(error instanceof Error ? error.message : String(error)) }
+    finally { if (request === generation) setBusy(false) }
+  }
+  function update(field: keyof AgentEditorDocument['values'], value: string) {
+    const selectedKey = key()
+    setEntries(old => { const current = old[selectedKey]; return current ? { ...old, [selectedKey]: { ...current, document: { ...current.document, values: { ...current.document.values, [field]: value } } } } : old })
+    setMessage('')
+  }
+  async function save() {
+    const current = entry(), id = props.agentId, selectedScope = scope(), selectedKey = key()
+    if (!current || busy()) return
+    const errors = validateAgentEditorDocument(current.document)
+    if (errors.length) { setMessage(errors.join(' ')); return }
+    if (selectedScope === 'global' && !window.confirm(`Save global configuration for ${id}? This affects other projects.`)) return
+    const request = ++generation
+    setBusy(true); setMessage('')
+    try {
+      const saved = await props.editor.save(id, selectedScope, current.document)
+      if (request !== generation) return
+      setEntries(old => ({ ...old, [selectedKey]: { document: saved, baseline: JSON.stringify(saved.values) } })); setMessage('Saved.')
+    } catch (error) { if (request === generation) setMessage(`Save failed: ${error instanceof Error ? error.message : String(error)}. Your draft was retained.`) }
+    finally { if (request === generation) setBusy(false) }
+  }
+  const rules = () => { try { return JSON.parse(entry()?.document.values.permissions ?? '[]') as PermissionRule[] } catch { return [] } }
+  const skillRules = () => rules().map((rule, index) => ({ rule, index })).filter(item => item.rule.action === 'skill')
+  const replaceRule = (index: number, patch: Partial<PermissionRule>) => update('permissions', JSON.stringify(updateSkillPermission(rules(), index, patch), null, 2))
+  return <section class="cdt-agent-draft">
+    <h4 class="cdt-subheading">Edit native override</h4>
+    <p class="cdt-muted cdt-meta">Drafts remain available when switching agents, scopes and tabs. Save checks the target revision.</p>
+    <Show when={Object.values(entries()).some(dirtyEntry)}><p class="cdt-inspector-note" role="status">Unsaved agent changes are retained in this panel.</p></Show>
+    <div class="cdt-row cdt-wrap"><label>Scope <select value={scope()} disabled={busy()} onChange={event => { setScope(event.currentTarget.value as ConfigurationScope); setMessage('') }}><option value="project">Project</option><option value="global">Global</option></select></label>
+    <button type="button" disabled={busy()} onClick={() => void load()}>{entry() ? 'Reload target' : 'Load target'}</button></div>
+    <Show when={entry()}>{item => <>
+      <p class="cdt-muted cdt-meta">Target: {item().document.target} · Revision: <span class="cdt-mono">{item().document.revision}</span></p>
+      <For each={item().document.warnings ?? []}>{warning => <p class="cdt-inspector-note">{warning}</p>}</For>
+      <fieldset class="cdt-editor-fieldset" disabled={busy()}><div class="cdt-draft-fields">
+        <label>Model <input list={modelListId} value={item().document.values.model} onInput={event => update('model', event.currentTarget.value)} placeholder="provider/model" /><datalist id={modelListId}><For each={arrayOf<DraftModel>(props.models)}>{model => <option value={model.id}>{model.name}</option>}</For></datalist></label>
+        <label>Variant <input list={variantListId} value={item().document.values.variant} onInput={event => update('variant', event.currentTarget.value)} /><datalist id={variantListId}><For each={arrayOf<DraftModel>(props.models).find(model => model.id === item().document.values.model)?.variants ?? []}>{variant => <option value={variant} />}</For></datalist></label>
+        <label>Steps <input type="number" min="1" max="10000" step="1" value={item().document.values.steps} onInput={event => update('steps', event.currentTarget.value)} /></label>
+        <label>System prompt <textarea rows="5" value={item().document.values.system} onInput={event => update('system', event.currentTarget.value)} /></label>
+      </div>
+      <h5 class="cdt-subheading">Skill permissions</h5>
+      <p class="cdt-muted cdt-meta">Rules are evaluated in order; the last matching rule wins. These permissions do not attach skills. Other permission rules are preserved.</p>
+      <Index each={skillRules()}>{item => <div class="cdt-skill-rule">
+        <label>Skill ID or pattern <input value={item().rule.resource} onInput={event => replaceRule(item().index, { resource: event.currentTarget.value })} /></label>
+        <label>Effect <select value={item().rule.effect} onChange={event => replaceRule(item().index, { effect: event.currentTarget.value as PermissionRule['effect'] })}><option value="ask">Ask</option><option value="allow">Allow</option><option value="deny">Deny</option></select></label>
+        <button type="button" aria-label={`Remove skill rule ${item().rule.resource}`} onClick={() => update('permissions', JSON.stringify(updateSkillPermission(rules(), item().index, null), null, 2))}>Remove</button>
+      </div>}</Index>
+      <button type="button" onClick={() => update('permissions', JSON.stringify([...rules(), { action: 'skill', resource: '', effect: 'ask' }], null, 2))}>Add skill rule</button>
+      </fieldset>
+      <button type="button" disabled={busy() || !dirty()} onClick={() => void save()}>{busy() ? 'Saving…' : 'Save override'}</button>
+    </>}</Show>
+    <Show when={busy() && !entry()}><p role="status">Loading target…</p></Show>
+    <Show when={message()}><p class="cdt-inspector-note" role="status">{message()}</p></Show>
+  </section>
 }

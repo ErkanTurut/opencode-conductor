@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { serializeAgentDraft, type AgentDraftInput } from '../../src/gui/agent-draft'
+import { serializeAgentDraft, validateAgentEditorDocument, updateSkillPermission, type AgentDraftInput } from '../../src/gui/agent-draft'
 const models = [{ id: 'provider/model', name: 'Model', variants: ['low', 'high'] }, { id: 'other/model', name: 'Other', variants: ['medium'] }]
 const input: AgentDraftInput = { agentId: 'coder', model: 'provider/model', variant: 'high', steps: '42', system: 'Prompt "quoted"\n---\ntext', skillIds: 'review\nsecurity\nreview', skillEffect: 'ask' }
 describe('native agent drafts', () => {
@@ -33,4 +33,29 @@ describe('native agent drafts', () => {
       expect(agent.permissions[0].effect).toBe(effect)
     }
   })
+})
+
+
+test('validates full target permission arrays without altering them', () => {
+  const document = { revision: 'v1', target: 'project config', values: { model: 'provider/model', variant: 'high', steps: '2', system: '', permissions: '[{"action":"skill","resource":"*","effect":"ask"}]' } }
+  expect(validateAgentEditorDocument(document)).toEqual([])
+  expect(validateAgentEditorDocument({ ...document, values: { ...document.values, permissions: '{}' } })).toContain('Permissions must be a JSON array.')
+  expect(validateAgentEditorDocument({ ...document, values: { ...document.values, permissions: '[' } })).toContain('Permissions must be a valid JSON array.')
+  expect(validateAgentEditorDocument({ ...document, values: { ...document.values, steps: '0' } })).toContain('Steps must be a positive whole number.')
+})
+
+
+test('skill rule edits retain non-skill rules and ordering', () => {
+  const rules = [{ action: 'bash', resource: '*', effect: 'ask' }, { action: 'skill', resource: '*', effect: 'deny' }, { action: 'skill', resource: 'review', effect: 'allow' }, { action: 'read', resource: '*', effect: 'allow' }]
+  const edited = updateSkillPermission(rules, 2, { effect: 'ask' })
+  expect(edited.map(rule => [rule.action, rule.resource, rule.effect])).toEqual([['bash', '*', 'ask'], ['skill', '*', 'deny'], ['skill', 'review', 'ask'], ['read', '*', 'allow']])
+  expect(updateSkillPermission(edited, 1, null)).toEqual([edited[0], edited[2], edited[3]])
+  expect(updateSkillPermission(edited, 0, null)).toEqual(edited)
+  expect(rules[2].effect).toBe('allow')
+})
+
+test('rejects incomplete skill permissions and out-of-range steps', () => {
+  const document = { revision: 'v1', target: 'project', values: { model: '', variant: '', steps: '10001', system: '', permissions: '[{"action":"skill","resource":"","effect":"ask"}]' } }
+  expect(validateAgentEditorDocument(document)).toContain('Steps must be a positive whole number.')
+  expect(validateAgentEditorDocument(document)).toContain('Each permission needs an action, a resource and a valid effect.')
 })

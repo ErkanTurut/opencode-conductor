@@ -83,6 +83,10 @@ export { canonicalLedgerKey } from './runtime/state-layout'
 // baseline records diagnostics by line, so nothing may shift lines 26-60.
 import { bootstrapCommand, isPushAllowed } from './runtime/bootstrap'
 import { detectProject } from './runtime/detect'
+import { recordMemoryDecision, persistCuratorProposal } from './runtime/closeout'
+import { loadProjectSettings } from './runtime/configuration-store'
+import { discoverPreview } from './runtime/preview'
+import { safeWriteArtifact, readOptionalArtifact } from './runtime/safe-write'
 
 /**
  * Bun shell tag (`$` from 'bun'). Kept loose on purpose: the tag is injected in
@@ -1397,12 +1401,12 @@ async function writeRunProjection(
   ledger: SqliteLedger,
   projection: ViewProjectionStore | null = null,
 ): Promise<void> {
+  if (!/^[A-Za-z0-9_-]+$/.test(runId)) throw new Error('invalid_run_id')
   const runDir = `${runsDir}/${runId}`
-  mkdirSync(runDir, { recursive: true })
   const run = await ledger.getRun(runId)
   const workItems = await ledger.listWorkItems(runId)
   const view = buildRunView(runId, run, workItems)
-  await Bun.write(`${runDir}/run.json`, JSON.stringify(view, null, 2))
+  safeWriteArtifact(`${runDir}/run.json`, JSON.stringify(view, null, 2))
   if (projection) {
     // Cache only, and never fatal: SQLite already holds the truth.
     try {
@@ -1414,9 +1418,9 @@ async function writeRunProjection(
 }
 
 async function writeTaskProjection(runsDir: string, task: any): Promise<void> {
+  if (!/^[A-Za-z0-9_-]+$/.test(task.run_id) || !/^[A-Za-z0-9_-]+$/.test(task.id)) throw new Error('invalid_task_id')
   const taskDir = `${runsDir}/${task.run_id}/tasks/${task.id}`
-  mkdirSync(taskDir, { recursive: true })
-  await Bun.write(
+  safeWriteArtifact(
     `${taskDir}/task.json`,
     JSON.stringify(
       {
@@ -1540,6 +1544,16 @@ export function registerSupervisorTools(
       additionalProperties: false,
     },
     async execute(args: any) {
+      let projectContext: Record<string, unknown>
+      try {
+        const settings = loadProjectSettings(repoRoot)
+        projectContext = {
+          branches: runtime.branches, verificationCommands: runtime.verifyProfile,
+          preview: discoverPreview(repoRoot, runtime.branches.dev, settings),
+          memoryDir: runtime.stateLayout?.memoryDir ?? `${repoRoot}/.opencode/memory`,
+          memoryEnabled: settings?.memory.enabled ?? true,
+        }
+      } catch (error) { return asContent({ error: 'project_settings_invalid', detail: String(error) }) }
       const runId = `run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
       await $`mkdir -p ${runsDir}/${runId}`.quiet()
 
@@ -1580,7 +1594,7 @@ export function registerSupervisorTools(
         args.uncertainties && args.uncertainties.length > 0
           ? 'awaiting_refinement'
           : 'intake'
-      return asContent({ run_id: runId, state })
+      return asContent({ run_id: runId, state, projectContext })
     },
   })
 
@@ -2513,19 +2527,50 @@ export function registerSupervisorTools(
     description: 'Write the durable run receipt without inventing a completed state.',
     input: {
       type: 'object',
-      properties: { run_id: { type: 'string' } },
+      properties: {
+        run_id: { type: 'string' },
+        memory_decision: { type: 'object', properties: { decision: { enum: ['none', 'curate', 'disabled'] }, rationale: { type: 'string', maxLength: 1000 } }, required: ['decision', 'rationale'], additionalProperties: false },
+        curator_no_learning: { type: 'string', minLength: 1, maxLength: 1000 },
+        curator_proposal: { type: 'object', properties: { label: { type: 'string' }, content: { type: 'string', maxLength: 5000 }, source_artifacts: { type: 'array', items: { type: 'string' }, maxItems: 10 }, expected_version: { type: 'integer', minimum: 0 } }, required: ['label', 'content', 'source_artifacts'], additionalProperties: false },
+      },
       required: ['run_id'],
       additionalProperties: false,
     },
     async execute(args: any) {
+      if (typeof args.run_id !== 'string' || !/^[A-Za-z0-9_-]+$/.test(args.run_id)) return asContent({ refused: true, error: 'invalid_run_id' })
+      if (!await ledger.getRun(args.run_id)) return asContent({ refused: true, error: 'run_not_found' })
       const receipt = await generateReceipt(args.run_id, ledger)
       const runDir = `${runsDir}/${args.run_id}`
-      await $`mkdir -p ${runDir}`.quiet()
+      const memoryEnabled = loadProjectSettings(repoRoot)?.memory.enabled ?? true
+      const storedDecision = readOptionalArtifact(`${runDir}/memory-decision.json`)
+      const priorDecision = storedDecision ? JSON.parse(storedDecision) : null
+      const decision = args.memory_decision ?? priorDecision ?? (!memoryEnabled
+        ? { decision: 'disabled', rationale: 'Memory learning is disabled by explicit project settings.' } : args.memory_decision
+      )
+      if (decision?.decision === 'disabled' && memoryEnabled) return asContent({ refused: true, error: 'memory_not_disabled_in_project_settings' })
+      if (!memoryEnabled && decision?.decision === 'curate') return asContent({ refused: true, error: 'memory_disabled_by_project_settings' })
+      const recorded = recordMemoryDecision(runDir, args.run_id, decision)
+      if (!recorded.ok) return asContent({ refused: true, ...recorded })
+      if (args.curator_no_learning !== undefined && (typeof args.curator_no_learning !== 'string' || !args.curator_no_learning.trim() || args.curator_no_learning.length > 1000 || !recorded.handoff || args.curator_proposal)) return asContent({ refused: true, error: 'invalid_curator_result' })
+      if (recorded.handoff && !args.curator_proposal && !args.curator_no_learning) return asContent({ closeout: 'handoff_required', run_id: args.run_id,
+        memory_dir: runtime.stateLayout?.memoryDir ?? `${repoRoot}/.opencode/memory`, artifacts_dir: `${runDir}/artifacts`,
+        message: 'Spawn memory-curator to inspect this run’s relevant artifacts and existing project memory. Return a bounded evidence-linked proposal, then repeat this call with the same decision and curator_proposal. No final receipt has been written.' })
+      let memoryPath: string | undefined
+      if (args.curator_proposal) {
+        if (!recorded.handoff) return asContent({ refused: true, error: 'proposal_without_curator_decision' })
+        const saved = persistCuratorProposal(runtime.stateLayout?.memoryDir ?? `${repoRoot}/.opencode/memory`, runDir, args.run_id, args.curator_proposal)
+        if (!saved.ok) return asContent({ refused: true, ...saved })
+        memoryPath = saved.path
+      }
+      if (args.curator_no_learning) safeWriteArtifact(`${runDir}/curator-review.json`, JSON.stringify({ run_id: args.run_id, outcome: 'no_learning', rationale: args.curator_no_learning }, null, 2))
       const receiptPath = `${runDir}/receipt.md`
       await writeReceiptToDisk(receipt, receiptPath)
+      await ledger.appendEvent({ runId: args.run_id, eventType: 'memory_review_completed', actor: 'conductor', payloadJson: JSON.stringify({ decision: decision.decision, outcome: memoryPath ? 'proposal_persisted' : args.curator_no_learning ? 'curated_no_learning' : decision.decision, path: memoryPath ?? null }) })
       await writeRunProjection(runsDir, args.run_id, ledger, projection)
       return asContent({
         receipt_path: receiptPath,
+        memory_outcome: memoryPath ? 'proposal_persisted' : args.curator_no_learning ? 'curated_no_learning' : decision?.decision,
+        memory_path: memoryPath,
         state: receipt.state,
         total_attempts: receipt.totalAttempts,
         repair_rounds: receipt.repairRounds,

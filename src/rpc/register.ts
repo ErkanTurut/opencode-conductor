@@ -50,6 +50,9 @@ import {
 import type { StateLayout } from '../runtime/state-layout'
 import { buildConfigurationSnapshot, buildProjectSnapshot } from '../read/configuration'
 import { reviewMemory } from '../runtime/memory-review'
+import { resolveAgentConfigDir } from '../register/agents'
+import { readAgentDocument, saveAgentDocument, readProjectSettings, saveProjectSettings, type ConfigurationAuthority } from '../runtime/configuration-store'
+import type { AgentConfigurationFields, ProjectSettings } from '../rpc-contract'
 
 // ---------------------------------------------------------------------------
 // Options
@@ -67,6 +70,10 @@ export interface RegisterConductorRpcOptions {
   branches?: { main: string; dev: string }
   verificationCommands?: string[]
   governance?: unknown
+  configDir?: string
+  globalDirectory?: string
+  onProjectSettingsSaved?: (settings: ProjectSettings) => void
+  configurationAuthorityIntact?: () => boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -171,6 +178,80 @@ export function loadFleetModels(
 }
 
 // ---------------------------------------------------------------------------
+// Native agent template
+// ---------------------------------------------------------------------------
+
+export interface NativeAgentTemplateInput {
+  description?: string
+  mode?: string
+  hidden?: boolean
+  color?: string
+  steps?: number
+  model?: string
+  permissions?: unknown
+  system: string
+}
+
+function yamlString(value: string): string {
+  // JSON string escaping is valid YAML double-quoted syntax. Avoid a raw
+  // newline or `---` breaking the frontmatter block.
+  return JSON.stringify(value)
+}
+
+/**
+ * Serialize the host's effective, allowlisted agent values as native Markdown.
+ *
+ * This is the source a new project/global override inherits so that editing one
+ * field cannot replace a JSONC-defined prompt or drop its restrictions. Only
+ * known fields are copied; provider requests, headers and credentials never
+ * enter the template. Invalid permission shapes fail closed.
+ */
+export function nativeAgentTemplate(input: NativeAgentTemplateInput): string {
+  if (typeof input.system !== 'string' || input.system.length > 1_000_000) {
+    throw new Error('Native system prompt is unavailable or too large to copy safely')
+  }
+  const lines: string[] = []
+  if (input.description !== undefined) lines.push(`description: ${yamlString(input.description)}`)
+  if (input.mode !== undefined) {
+    if (!['primary', 'subagent', 'all'].includes(input.mode)) throw new Error('Unsupported native agent mode')
+    lines.push(`mode: ${input.mode}`)
+  }
+  if (input.hidden !== undefined) lines.push(`hidden: ${input.hidden ? 'true' : 'false'}`)
+  if (input.color !== undefined) lines.push(`color: ${yamlString(input.color)}`)
+  if (input.steps !== undefined) {
+    if (!Number.isSafeInteger(input.steps) || input.steps < 1) throw new Error('Invalid native step limit')
+    lines.push(`steps: ${input.steps}`)
+  }
+  if (input.model !== undefined) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._:/-]*(?:#[A-Za-z0-9][A-Za-z0-9._-]*)?$/.test(input.model)) {
+      throw new Error('Native model reference cannot be copied safely')
+    }
+    lines.push(`model: ${yamlString(input.model)}`)
+  }
+  if (input.permissions !== undefined) {
+    if (!Array.isArray(input.permissions) || input.permissions.length > 1000) throw new Error('Invalid native permission list')
+    const rules = input.permissions.map((value) => {
+      const rule = asRecord(value)
+      if (!rule || typeof rule.action !== 'string' || !rule.action || typeof rule.resource !== 'string'
+        || typeof rule.effect !== 'string' || !['allow', 'ask', 'deny'].includes(rule.effect)) {
+        throw new Error('Native permission rules cannot be copied safely')
+      }
+      return { action: rule.action, resource: rule.resource, effect: rule.effect }
+    })
+    if (rules.length > 0) {
+      lines.push('permissions:')
+      for (const rule of rules) {
+        lines.push(`  - action: ${yamlString(rule.action)}`)
+        lines.push(`    resource: ${yamlString(rule.resource)}`)
+        lines.push(`    effect: ${rule.effect}`)
+      }
+    }
+  }
+  const front = lines.length > 0 ? `${lines.join('\n')}\n` : ''
+  return `---\n${front}---\n${input.system}`
+}
+
+// ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
 
@@ -204,8 +285,80 @@ export async function registerConductorRpc(
 
   const reader = new LedgerReader(options.layout.ledgerPath)
   const layout = options.layout
+  const configurationAuthority: ConfigurationAuthority = {
+    projectRoot: options.projectRoot,
+    configDir: options.configDir ?? resolveAgentConfigDir(process.env) ?? '',
+    assetsDir: options.assetsDir,
+  }
+  const configurationGuard = () => !options.trusted
+    ? errorEnvelope('untrusted_project', 'Trust this project before inspecting or saving editable configuration.')
+    : options.policyRestricted || options.configurationAuthorityIntact?.() === false ? errorEnvelope('policy_restricted', 'Configuration editing is unavailable while trust or policy authority is unresolved or changed.') : null
+  const configError = (error: unknown) => errorEnvelope(
+    /revision conflict/.test(detail(error)) ? 'conflict' : 'invalid_configuration', detail(error),
+  )
+  async function editableAuthority(agentId: string, scope: 'project' | 'global'): Promise<ConfigurationAuthority> {
+    if (typeof ctx?.agent?.get !== 'function') return configurationAuthority
+    // Resolve through OpenCode, not a competing JSONC hierarchy. Global edits
+    // must never copy a project's prompt into the user's global definition.
+    if (scope === 'global' && !options.globalDirectory) return configurationAuthority
+    const raw = await ctx.agent.get({ agentID: agentId }, scope === 'global'
+      ? { location: { directory: options.globalDirectory } } : undefined)
+    const native = asRecord(asRecord(raw)?.data) ?? asRecord(raw)
+    if (!native) return configurationAuthority
+    const model = asRecord(native.model)
+    const inheritedAgent = nativeAgentTemplate({
+      description: typeof native.description === 'string' ? native.description : undefined,
+      mode: typeof native.mode === 'string' ? native.mode : undefined,
+      hidden: typeof native.hidden === 'boolean' ? native.hidden : undefined,
+      color: typeof native.color === 'string' ? native.color : undefined,
+      steps: typeof native.steps === 'number' ? native.steps : undefined,
+      model: model && typeof model.providerID === 'string' && typeof model.id === 'string'
+        ? `${model.providerID}/${model.id}${typeof model.variant === 'string' ? `#${model.variant}` : ''}` : undefined,
+      permissions: Array.isArray(native.permissions) ? native.permissions : undefined,
+      system: typeof native.system === 'string' ? native.system : '',
+    })
+    return { ...configurationAuthority, inheritedAgent }
+  }
 
   const handlers: Record<string, Handler> = {
+    agentDocument: guarded('agentDocument', async (input) => {
+      const refusal = configurationGuard(); if (refusal) return refusal
+      if (typeof input.agentId !== 'string' || !['global', 'project'].includes(String(input.scope))) return errorEnvelope('invalid_input', 'Agent ID and configuration scope are required.')
+      try {
+        const editAuthority = await editableAuthority(input.agentId, input.scope as 'project' | 'global')
+        const refusalAfterResolution = configurationGuard(); if (refusalAfterResolution) return refusalAfterResolution
+        return okEnvelope(readAgentDocument(editAuthority, { agentId: input.agentId, scope: input.scope as 'project' | 'global' }))
+      }
+      catch (error) { return configError(error) }
+    }),
+    saveAgentConfiguration: guarded('saveAgentConfiguration', async (input) => {
+      const refusal = configurationGuard(); if (refusal) return refusal
+      if (typeof input.agentId !== 'string' || typeof input.expectedRevision !== 'string' || !['global', 'project'].includes(String(input.scope)) || !asRecord(input.fields)) return errorEnvelope('invalid_input', 'Agent ID, scope, revision and fields are required.')
+      try {
+        const editAuthority = await editableAuthority(input.agentId, input.scope as 'project' | 'global')
+        const refusalAfterResolution = configurationGuard(); if (refusalAfterResolution) return refusalAfterResolution
+        const saved = saveAgentDocument(editAuthority, { agentId: input.agentId, scope: input.scope as 'project' | 'global', expectedRevision: input.expectedRevision, fields: input.fields as Partial<AgentConfigurationFields> })
+        // Persisted success is distinct from host reload success. Never retry a
+        // successful write with the old revision after a reload failure.
+        if (typeof ctx?.agent?.reload === 'function') {
+          try { await ctx.agent.reload() } catch { saved.warnings.push('Saved to disk; the host could not reload agents. Reload agents before relying on the new effective settings.') }
+        } else saved.warnings.push('Saved to disk. This host does not expose agent.reload; reload the plugin to refresh agents.')
+        return okEnvelope(saved)
+      } catch (error) { return configError(error) }
+    }),
+    projectSettings: guarded('projectSettings', async () => {
+      const refusal = configurationGuard(); if (refusal) return refusal
+      try { return okEnvelope(readProjectSettings(configurationAuthority)) } catch (error) { return configError(error) }
+    }),
+    saveProjectSettings: guarded('saveProjectSettings', async (input) => {
+      const refusal = configurationGuard(); if (refusal) return refusal
+      if (typeof input.expectedRevision !== 'string' || !asRecord(input.settings)) return errorEnvelope('invalid_input', 'Project revision and settings are required.')
+      try {
+        const saved = saveProjectSettings(configurationAuthority, { expectedRevision: input.expectedRevision, settings: input.settings as unknown as ProjectSettings })
+        if (saved.settings) options.onProjectSettingsSaved?.(saved.settings)
+        return okEnvelope(saved)
+      } catch (error) { return configError(error) }
+    }),
     configuration: guarded('configuration', async () => {
       let native: unknown
       let models: unknown
@@ -397,7 +550,7 @@ export async function registerConductorRpc(
           runId,
           tasks,
           attempts,
-          fleetModels: loadFleetModels(options.assetsDir),
+          fleetModels: {}, // Historical attempts are authoritative; no competing fleet defaults.
         }),
       )
     }),

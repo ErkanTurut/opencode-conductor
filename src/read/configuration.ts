@@ -3,11 +3,12 @@
 import {
   inspectAgentConfigs,
   loadAgentDefinitions,
-  loadFleetConfig,
   type MutableAgentConfig,
 } from '../register/agents'
 import type { ConfigurationData, ProjectData } from '../rpc-contract'
 import { hashProjectPolicy, parseProjectPolicy } from '../runtime/project-governance'
+import { discoverPreview } from '../runtime/preview'
+import { loadProjectSettings } from '../runtime/configuration-store'
 
 function record(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -28,7 +29,7 @@ export function buildConfigurationSnapshot(
   nativeValue?: unknown,
   modelValue?: unknown,
 ): ConfigurationData {
-  const definitions = assetsDir ? loadAgentDefinitions(assetsDir, loadFleetConfig(assetsDir)) : []
+  const definitions = assetsDir ? loadAgentDefinitions(assetsDir) : []
   const native: Record<string, MutableAgentConfig> = Object.create(null)
   const raw = Array.isArray(nativeValue) ? nativeValue : Array.isArray(record(nativeValue)?.data) ? record(nativeValue)!.data as unknown[] : null
   if (raw) {
@@ -90,17 +91,23 @@ export function buildProjectSnapshot(input: {
   governance?: unknown
 }): ProjectData {
   const policy = parseProjectPolicy(input.governance)
+  let settings: ReturnType<typeof loadProjectSettings> = null
+  let settingsWarning: string | null = null
+  try { settings = loadProjectSettings(input.projectRoot) }
+  catch { settingsWarning = 'Project settings could not be read. Fix the configuration before starting a run; no settings from it are assumed here.' }
   return {
     projectRoot: input.projectRoot,
-    branches: input.branches ?? null,
-    verificationCommands: input.verificationCommands ?? [],
+    branches: input.branches ?? settings?.branches ?? null,
+    verificationCommands: input.verificationCommands ?? settings?.verificationCommands ?? [],
+    preview: discoverPreview(input.projectRoot, settings?.branches.dev ?? input.branches?.dev ?? 'develop', settings),
     policy,
     policyHash: policy ? hashProjectPolicy(policy) : null,
     policySource: 'OpenCode plugin options.governance (project configuration may only tighten broader authority)',
     capabilities: { mergeExecutor: 'unavailable', previewAdapter: 'unavailable', remoteProtection: 'unknown' },
     warnings: [
+      ...(settingsWarning ? [settingsWarning] : []),
       ...(!policy ? ['No valid candidate-bound governance policy configured. Remote changes are not authorized by this view.'] : []),
-      'No authenticated preview/remote-protection adapter or merge executor is connected. Local evidence is not merge authorization.',
+      'Preview configuration is awareness, not proof that a deployment passed. Verify the pushed commit with the existing provider before opening the PR.',
     ],
   }
 }

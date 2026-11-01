@@ -19,19 +19,6 @@ import {
 } from './worktrees'
 import { Watchdog } from './watchdog'
 import {
-  selectFallbackModel,
-  recordModelFailure,
-  recordModelSuccess,
-} from './model-router'
-import type { ModelRegistry } from './model-router'
-import type { SelectionEvent } from './model-router'
-import {
-  loadFleetConfig,
-  buildModelRegistry,
-  selectFleetModel,
-} from './fleet-config'
-import type { FleetConfig } from './fleet-config'
-import {
   runVerification,
   getArtifactPaths,
   ensureArtifactDirs,
@@ -52,6 +39,10 @@ import {
   type PermissionRule,
 } from './policy'
 import { readFileSync } from 'node:fs'
+import { recordMemoryDecision, persistCuratorProposal, type MemoryDecision, type CuratorProposal } from './runtime/closeout'
+import { loadProjectSettings } from './runtime/configuration-store'
+import { resolveStateLayout } from './runtime/state-layout'
+import { readOptionalArtifact } from './runtime/safe-write'
 
 /**
  * Parse a work item's recorded verification commands.
@@ -204,8 +195,6 @@ export class Runner {
   private worktrees: WorktreeProvider
   private watchdog: Watchdog
   private config: RunnerConfig
-  private fleetConfig: FleetConfig
-  private modelRegistry: ModelRegistry
 
   constructor(config: RunnerConfig) {
     this.config = config
@@ -217,10 +206,6 @@ export class Runner {
       mainRepoPath: config.mainRepoPath,
     })
     this.watchdog = new Watchdog(this.ledger)
-    // Registry comes from the merged fleet-config view (built-ins patched
-    // with persisted enabled flags + extra catalog entries).
-    this.fleetConfig = loadFleetConfig()
-    this.modelRegistry = buildModelRegistry(this.fleetConfig)
   }
 
   async createRun(
@@ -448,52 +433,18 @@ export class Runner {
       ...JSON.parse(run.budget_json || '{}'),
     }
 
-    // Select model (fleet-config aware: overrides + disabled exclusion)
+    // OpenCode owns model selection for native agents. Never override it with
+    // a second fleet catalog. The CLI adapter does not report resolved models,
+    // so provenance remains explicitly unknown rather than a guessed default.
     const role = item.owner_role as AgentRole
-
-    // Selection observability. Every evaluated rung is ledgered as a
-    // rung-schema SelectionEvent (`model_selected` /
-    // `no_cross_family_substitution`) so routing decisions survive process exit
-    // and `ModelRouter.restore` can rebuild breaker + last-rung memory.
-    const onSelection = async (event: SelectionEvent) => {
-      try {
-        await this.ledger.appendEvent({
-          runId: item.run_id,
-          workItemId,
-          eventType: event.type,
-          actor: 'supervisor',
-          payloadJson: JSON.stringify(event),
-        })
-      } catch {
-        // Observability must never block or fail task execution.
-      }
-    }
-
-    // Feature test (NOT an arity gate): the options-aware selector names its
-    // `onSelection` option in the source; the legacy 3-arg selector never
-    // mentions it. `Function.length` reports 3 for a defaulted options param,
-    // so arity cannot distinguish the merged t6 API — this probe does.
-    const supportsObserver = (() => {
-      try {
-        return /onSelection/.test(Function.prototype.toString.call(selectFleetModel))
-      } catch {
-        return false
-      }
-    })()
-    const selection = supportsObserver
-      ? selectFleetModel(this.modelRegistry, this.fleetConfig, role, { onSelection })
-      : selectFleetModel(this.modelRegistry, this.fleetConfig, role)
-    if (!selection) {
-      return { success: false, error: 'No available model for role' }
-    }
 
     const attemptId = `att-${Date.now()}-${Math.random().toString(36).slice(2)}`
     const leaseOwner = `worker-${process.pid}`
     const leaseExpiry = new Date(Date.now() + (budget.max_task_wall_time_ms ?? DEFAULT_BUDGET.max_task_wall_time_ms)).toISOString()
     const claim = this.ledger.claimTaskAtomic ? await this.ledger.claimTaskAtomic({
       runId: item.run_id, workItemId, leaseOwner, leaseExpiresAt: leaseExpiry,
-      attempt: { id: attemptId, workItemId, harness: 'opencode-cli', modelProvider: selection.providerId,
-        modelId: selection.modelId, modelVariant: selection.variant ?? null, workspaceId: null, baseSha: '' },
+      attempt: { id: attemptId, workItemId, harness: 'opencode-cli', modelProvider: 'unknown',
+        modelId: 'unknown', modelVariant: null, workspaceId: null, baseSha: '' },
     }) : { claimed: false, fencingToken: -1, error: 'Atomic admission unavailable' }
     if (!claim.claimed) return { success: false, error: claim.error ?? 'Failed to claim lease' }
 
@@ -574,8 +525,6 @@ export class Runner {
         runId: item.run_id,
         objective: item.title,
         role: item.owner_role,
-        model: `${selection.providerId}/${selection.modelId}`,
-        variant: selection.variant,
         worktree: worktreePath,
         allowedPaths,
         acceptanceCriteria,
@@ -624,7 +573,6 @@ export class Runner {
 
       // Record outcome
       if (resultResult.success) {
-        recordModelSuccess(this.modelRegistry, selection.key)
 
         // Run verification into the unified verification dir. An empty command
         // list is a hard failure FOR MUTATING ROLES: `[].every(...)` is vacuously
@@ -695,8 +643,8 @@ export class Runner {
         // Get evidence
         const evidence = {
           attempted_at: new Date().toISOString(),
-          model: `${selection.providerId}/${selection.modelId}`,
-          model_key: selection.key,
+          model: null,
+          model_source: 'native-agent (resolved model unavailable from CLI adapter)',
           duration_ms: resultResult.durationMs,
           usage: resultResult.usage,
           verification_results: verificationResults,
@@ -755,30 +703,6 @@ export class Runner {
         }
 
         return { success: completed }
-      }
-
-      // Failure path
-      recordModelFailure(this.modelRegistry, selection.key)
-
-      // Try fallback model
-      const fallback = selectFallbackModel(
-        this.modelRegistry,
-        selection.key,
-        role,
-      )
-      if (fallback) {
-        // Could retry with fallback, but defer to repair loop for now
-        await this.ledger.appendEvent({
-          runId: item.run_id,
-          workItemId,
-          attemptId,
-          eventType: 'attempt_failed',
-          actor: 'supervisor',
-          payloadJson: JSON.stringify({
-            reason: 'primary_model_failed',
-            fallback_available: fallback.key,
-          }),
-        })
       }
 
       const recorded = await this.ledger.finishTaskAtomic?.({ runId: item.run_id, workItemId, attemptId,
@@ -952,10 +876,23 @@ export class Runner {
     return { workItemId, acceptanceCriteria: next, added }
   }
 
-  async generateRunReceipt(runId: string): Promise<string> {
+  async generateRunReceipt(runId: string, memory?: { decision: MemoryDecision; proposal?: CuratorProposal }): Promise<string> {
+    if (!/^[A-Za-z0-9_-]+$/.test(runId) || !await this.ledger.getRun(runId)) throw new Error('Invalid or unknown run ID')
     const receipt = await generateReceipt(runId, this.ledger)
     const paths = getArtifactPaths(runId, this.config.repoRoot)
     await ensureArtifactDirs(paths)
+    const enabled = loadProjectSettings(this.config.repoRoot)?.memory.enabled ?? true
+    const prior = readOptionalArtifact(`${paths.runDir}/memory-decision.json`)
+    const decision = memory?.decision ?? (prior ? JSON.parse(prior) as MemoryDecision : undefined) ?? (!enabled ? { decision: 'disabled' as const, rationale: 'Memory learning is disabled by explicit project settings.' } : undefined)
+    if (enabled && decision?.decision === 'disabled') throw new Error('Memory is not disabled in project settings')
+    if (!enabled && decision?.decision === 'curate') throw new Error('Memory learning is disabled in project settings')
+    const recorded = recordMemoryDecision(paths.runDir, runId, decision)
+    if (!recorded.ok) throw new Error(recorded.error)
+    if (recorded.handoff) {
+      if (!memory?.proposal) throw new Error('memory_curator_handoff_required: delegate memory-curator, then submit its evidence-linked proposal')
+      const saved = persistCuratorProposal(resolveStateLayout({ projectRoot: this.config.repoRoot }).memoryDir, paths.runDir, runId, memory.proposal)
+      if (!saved.ok) throw new Error(saved.error)
+    } else if (memory?.proposal) throw new Error('Proposal requires a curate decision')
     const receiptPath = `${paths.runDir}/receipt.md`
     await writeReceiptToDisk(receipt, receiptPath)
     return receiptPath

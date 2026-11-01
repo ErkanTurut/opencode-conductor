@@ -13,6 +13,12 @@ import { ConfigurationView } from './views/configuration'
 import { ProjectView } from './views/project'
 import { formatDateTime, stateTone, taskProgress } from './format'
 import { Badge } from './components'
+import type { AgentConfigurationDocument, AgentConfigurationFields, ProjectSettingsDocument } from '../rpc-contract'
+
+type EditorMethod = 'agentDocument' | 'saveAgentConfiguration' | 'projectSettings' | 'saveProjectSettings'
+type LocatedAgentDocument = AgentEditorDocument & { directory: string; generation: number; original: AgentConfigurationFields }
+type LocatedProjectDocument = ProjectSettingsDocument & { directory: string; generation: number }
+import type { AgentEditorAdapter, AgentEditorDocument } from './agent-draft'
 
 export const CONDUCTOR_TABS = ['runs', 'dag', 'gates', 'refinements', 'memory', 'routing', 'agents', 'project'] as const
 export type ConductorTab = (typeof CONDUCTOR_TABS)[number]
@@ -42,6 +48,14 @@ export function ConductorPanel(props: PanelProps) {
   const [detailLoading, setDetailLoading] = createSignal(false)
   const [memoryLoading, setMemoryLoading] = createSignal(true)
   const [error, setError] = createSignal<string | null>(null)
+  const [directories, setDirectories] = createSignal<string[]>([])
+  const [configurationCache, setConfigurationCache] = createSignal<Record<string, ConfigurationData>>({})
+  const [projectCache, setProjectCache] = createSignal<Record<string, ProjectData>>({})
+  const [dirtyEditors, setDirtyEditors] = createSignal<Record<string, boolean>>({})
+  function setEditorDirty(key: string, dirty: boolean) { setDirtyEditors(old => old[key] === dirty ? old : { ...old, [key]: dirty }) }
+  const beforeUnload = (event: BeforeUnloadEvent) => { if (Object.values(dirtyEditors()).some(Boolean)) { event.preventDefault(); event.returnValue = '' } }
+  window.addEventListener('beforeunload', beforeUnload)
+  onCleanup(() => window.removeEventListener('beforeunload', beforeUnload))
   const activeTab = () => resolveTab(props.tab.id)
   const selected = createMemo(() => runs().find(run => run.id === selectedId()) ?? selectedSummary())
   let projectGeneration = 0
@@ -54,7 +68,8 @@ export function ConductorPanel(props: PanelProps) {
   }
   // Reset synchronously on directory changes; responses retain the captured location.
   createEffect(() => {
-    props.session.directory
+    const directory = props.session.directory
+    setDirectories(old => old.includes(directory) ? old : [...old, directory])
     projectGeneration++; pageGeneration++; initialPageLoaded = false
     setRuns([]); setWorkspace(null); setCursor(null); setLoadingMore(false); setSelectedId(null); setSelectedSummary(null)
     setConfiguration(null); setProject(null); setProjectLoading(true)
@@ -99,11 +114,11 @@ export function ConductorPanel(props: PanelProps) {
         } else if (tab === 'agents') {
           const result = await call<ConfigurationData>(() => rpc().configuration({}, { location }))
           if (!valid()) return
-          setProjectLoading(false); setConfiguration(result.data); setError(result.error)
+          setProjectLoading(false); if (result.data) { setConfiguration(result.data); setConfigurationCache(old => ({ ...old, [directory]: result.data! })) }; setError(result.error)
         } else if (tab === 'project') {
           const result = await call<ProjectData>(() => rpc().project({}, { location }))
           if (!valid()) return
-          setProjectLoading(false); setProject(result.data); setError(result.error)
+          setProjectLoading(false); if (result.data) { setProject(result.data); setProjectCache(old => ({ ...old, [directory]: result.data! })) }; setError(result.error)
         } else if (tab === 'memory') {
           const result = await call<MemoryData>(() => rpc().memory({ limit: 50 }, { location }))
           if (!valid()) return
@@ -162,6 +177,51 @@ export function ConductorPanel(props: PanelProps) {
     if (result.error) { setError(result.error); return null }
     return isRecord(result.data) && isRecord(result.data.block) ? result.data.block as unknown as MemoryBlockData : result.data as MemoryBlockData | null
   }
+  async function editorCall<T>(method: EditorMethod, input: unknown, directory: string, generation: number): Promise<T> {
+    if (disposed || generation !== projectGeneration || directory !== props.session.directory) throw new Error('Project changed. Reload the target before saving.')
+    const result = await call<T>(() => rpc()[method](input, { location: { directory } }))
+    if (disposed || generation !== projectGeneration || directory !== props.session.directory) throw new Error('Project changed. Reload the target before saving.')
+    if (result.error || !result.data) throw new Error(result.error ?? 'No document returned.')
+    return result.data
+  }
+  const agentEditor: AgentEditorAdapter = {
+    async load(agentId, scope) {
+      const directory = props.session.directory, generation = projectGeneration
+      const data = await editorCall<AgentConfigurationDocument>('agentDocument', { agentId, scope }, directory, generation)
+      if (!data.writable) throw new Error((data.warnings || []).join(' ') || 'Target is not writable.')
+      const [model, variant = ''] = (data.fields.model || '').split('#')
+      return { revision: data.revision, target: data.target, warnings: data.warnings, original: data.fields, values: { model, variant, steps: data.fields.steps == null ? '' : String(data.fields.steps), system: data.fields.system, permissions: JSON.stringify(data.fields.permissions, null, 2) }, directory, generation } as AgentEditorDocument
+    },
+    async save(agentId, scope, document) {
+      const context = document as LocatedAgentDocument
+      const values = document.values
+      const original = context.original
+      const model = values.variant ? `${values.model}#${values.variant}` : values.model
+      const permissions = JSON.parse(values.permissions)
+      const fields: Record<string, unknown> = {}
+      if (model !== original.model) fields.model = model
+      const steps = values.steps ? Number(values.steps) : null
+      if (steps !== original.steps) fields.steps = steps
+      if (values.system !== original.system) fields.system = values.system
+      if (JSON.stringify(permissions) !== JSON.stringify(original.permissions)) fields.permissions = permissions
+      if (context.directory !== props.session.directory) throw new Error('Project changed. Return to the original project to save.')
+      const data = await editorCall<AgentConfigurationDocument>('saveAgentConfiguration', { agentId, scope, expectedRevision: document.revision, fields }, context.directory, projectGeneration)
+      const [savedModel, variant = ''] = (data.fields.model || '').split('#')
+      return { ...context, original: data.fields, warnings: data.warnings, revision: data.revision, target: data.target, values: { model: savedModel, variant, steps: data.fields.steps == null ? '' : String(data.fields.steps), system: data.fields.system, permissions: JSON.stringify(data.fields.permissions, null, 2) } }
+    },
+  }
+  const projectEditor = {
+    async load() {
+      const directory = props.session.directory, generation = projectGeneration
+      const data = await editorCall<ProjectSettingsDocument>('projectSettings', {}, directory, generation)
+      return { ...data, directory, generation }
+    },
+    async save(value: ProjectSettingsDocument) {
+      const document = value as LocatedProjectDocument
+      const data = await editorCall<ProjectSettingsDocument>('saveProjectSettings', { expectedRevision: document.revision, settings: document.settings }, document.directory, document.directory === props.session.directory ? projectGeneration : document.generation)
+      return { ...data, directory: document.directory, generation: document.generation }
+    },
+  }
   function selectRun(id: string) {
     setSelectedSummary(runs().find(run => run.id === id) ?? null)
     setSelectedId(id)
@@ -197,8 +257,10 @@ export function ConductorPanel(props: PanelProps) {
       <Match when={activeTab() === 'refinements'}><RefinementsView data={refinements()} loading={detailLoading()} hasRun={!!selectedId()} /></Match>
       <Match when={activeTab() === 'memory'}><MemoryView data={memory()} loading={memoryLoading()} loadBlock={loadMemoryBlock} scopeKey={props.session.directory} /></Match>
       <Match when={activeTab() === 'routing'}><RoutingView data={routing()} timeline={timeline()} loading={detailLoading()} hasRun={!!selectedId()} /></Match>
-      <Match when={activeTab() === 'agents'}><ConfigurationView data={configuration()} loading={projectLoading()} /></Match>
-      <Match when={activeTab() === 'project'}><ProjectView data={project()} loading={projectLoading()} /></Match>
     </Switch>
+    <For each={directories()}>{directory => <>
+      <div hidden={activeTab() !== 'agents' || directory !== props.session.directory}><ConfigurationView data={configurationCache()[directory] ?? null} loading={projectLoading()} editor={agentEditor} onDirty={dirty => setEditorDirty(`${directory}:agent`, dirty)} /></div>
+      <div hidden={activeTab() !== 'project' || directory !== props.session.directory}><ProjectView data={projectCache()[directory] ?? null} loading={projectLoading()} editor={projectEditor} onDirty={dirty => setEditorDirty(`${directory}:project`, dirty)} /></div>
+    </>}</For>
   </div>
 }

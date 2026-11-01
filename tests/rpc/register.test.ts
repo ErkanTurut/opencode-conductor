@@ -70,17 +70,21 @@ describe('registerConductorRpc — registration', () => {
     expect(handlerMethods).toEqual(contractMethods)
     expect(handlerMethods).toEqual(
       [
+        'agentDocument',
         'configuration',
         'dag',
         'gates',
         'memory',
         'memoryBlock',
         'project',
+        'projectSettings',
         'refinements',
         'routing',
         'run',
         'runs',
         'timeline',
+        'saveAgentConfiguration',
+        'saveProjectSettings',
         'workspace',
       ].sort(),
     )
@@ -271,7 +275,7 @@ describe('registerConductorRpc — handlers', () => {
     expect(badVersion.error.code).toBe('invalid_input')
   })
 
-  it('routing merges fleet assignments, observed attempts and costs', async () => {
+  it('routing reports historical observed models and costs without overriding them from fleet', async () => {
     const assetsDir = join(project.root, 'assets')
     mkdirSync(assetsDir, { recursive: true })
     writeFileSync(
@@ -288,12 +292,8 @@ describe('registerConductorRpc — handlers', () => {
     })
     const result = await handler(captured, 'routing')({ runId: ids.runId })
     expect(result.ok).toBe(true)
-    expect(result.data.assignments).toContainEqual({
-      role: 'coder',
-      model: 'fleet/flash',
-      variant: 'max',
-      source: 'fleet',
-    })
+    expect(result.data.assignments).not.toContainEqual(expect.objectContaining({ model: 'fleet/flash', source: 'fleet' }))
+    expect(result.data.observed).toContainEqual(expect.objectContaining({ role: 'coder', modelProvider: 'opencode-go', modelId: 'deepseek-v4.1-flash' }))
     expect(result.data.costs.totalTokens).toBe(1000)
     expect(result.data.costs.totalCost).toBeNull()
     expect(result.data.costs.coverage).toEqual({ attempts: 2, withUsage: 1 })

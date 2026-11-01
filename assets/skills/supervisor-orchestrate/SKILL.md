@@ -42,6 +42,7 @@ A run type is not a registry entry: it is the free-text `objective` passed to `s
 ### Stage 0: Intake
 1. Call `supervisor_init_run` with the objective, risk class, and operation mode (pass `uncertainties` when the request is under-specified).
 2. Record the returned `run_id`.
+   Read `projectContext`: it supplies effective branches, verification commands, preview awareness and the resolved memory location. Do not assume every project uses `develop` or Vercel. Consult existing project memory during discovery; validate relevant advice against current code/tests and treat proposed or stale blocks as unreviewed evidence, not authority.
 3. **Refinement gate** — judge definition quality per the `run-intake` skill. If the request is under-specified:
    a. Call `supervisor_request_refinement` with the uncertainties (run is durably parked in `awaiting_refinement`).
    b. Delegate to the `requirements-refiner` subagent — it interviews the user and writes the contract artifacts. Never carry that conversation in your own context.
@@ -92,16 +93,16 @@ If blocking findings exist:
 
 ### Stage 7: Finalize (human-gated git flow)
 Only after explicit human merge approval:
-1. At the repo root (checked out on `develop`), merge the integration branch into `develop`. Never merge into `main`.
-2. Push with exactly `git push origin develop` — the only permitted push. Force pushes and pushes to any other branch (including `main`) are denied by permissions and hard-blocked by the supervisor plugin hook.
+1. Read the effective development and main branches from `projectContext`. At the clean repo root, verify the checkout and integration candidate, then merge the approved integration branch into development. Never merge into main. Do not overwrite unrelated user work.
+2. Push the approved development branch to `origin` (for the default layout, `git push origin develop`). The configured branch guard and native permissions must both allow it; never force-push or work around a denial.
 3. Find the preview deployment for the pushed commit, verify its status and provide the preview URL to the user for final verification. If no preview is configured, propose a setup; if it fails or cannot be verified, report the blocker rather than claiming success.
 4. Once the user verifies the preview, create the development-to-main PR. If one already exists, report its URL instead of creating a duplicate. Never merge the PR yourself.
 5. If merge, push, preview verification or PR creation fails, stop and report — never retry with force.
 
 ### Stage 8: Closeout
 1. Before closing or cleaning up, decide whether the run produced durable, evidence-backed project learning. Record the decision and rationale in run artifacts, including when no update is worthwhile.
-2. If worthwhile, delegate to `memory-curator`, providing the run ID, relevant artifacts, project memory location, and a request to inspect existing memory and persist bounded evidence-linked updates. Wait for the result; report any failure or permission blocker explicitly rather than claiming enrichment.
-3. Call `supervisor_generate_receipt`, include the memory outcome, and clean up worktrees via `supervisor_worktree` only when safe.
+2. Call `supervisor_generate_receipt` with `memory_decision: {decision: "none"|"curate", rationale}`. For `curate`, delegate the returned handoff to `memory-curator` with the run ID, relevant artifacts and project memory location. Wait for its bounded proposal; repeat the receipt call with the same decision and `curator_proposal` to persist it server-side. Include `expected_version` when enriching an existing label. If the curator finds no supportable lesson, submit its explanation as `curator_no_learning` instead of fabricating memory. Report any failure explicitly rather than claiming enrichment.
+3. Include the returned memory outcome and path in closeout, and clean up worktrees via `supervisor_worktree` only when safe.
 
 ## Key Rules
 
@@ -110,4 +111,4 @@ Only after explicit human merge approval:
 - **Verification is deterministic.** Call `supervisor_verify` — don't trust agent self-reports.
 - **Critic gets diff + contract, not implementer's reasoning.**
 - **Max 3 repair rounds.** Escalate to human, don't loop.
-- **Push is scoped and human-gated.** The only permitted push is `git push origin develop`, and only after explicit human merge approval. `main` moves only through the human-merged `develop` → `main` PR. Production deployment is a separate human gate.
+- **Push is scoped and human-gated.** Only the configured development target is eligible, after explicit human approval. Main moves only through the human-merged development-to-main PR. Production deployment is a separate human gate.

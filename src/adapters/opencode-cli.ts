@@ -3,7 +3,8 @@ export interface AgentSpec {
   runId: string
   objective: string
   role: string
-  model: string
+  /** Omit to let OpenCode resolve the native agent's configured model. */
+  model?: string
   variant?: string
   worktree: string
   allowedPaths: string[]
@@ -62,6 +63,11 @@ export function buildTaskPrompt(spec: AgentSpec): string {
   ].join('\n')
 }
 
+export function buildAgentArguments(spec: AgentSpec): string[] {
+  const model = spec.model ? (spec.variant ? `${spec.model}#${spec.variant}` : spec.model) : undefined
+  return ['run', '--agent', spec.role, ...(model ? ['--model', model] : []), buildTaskPrompt(spec)]
+}
+
 export class OpenCodeCliAdapter implements IAgentAdapter {
   private sessions: Map<
     string,
@@ -78,20 +84,13 @@ export class OpenCodeCliAdapter implements IAgentAdapter {
   }
 
   private executable(): string {
-    return process.env.OPENCODE_BIN?.trim() || 'opencode2'
-  }
-
-  private buildPrompt(spec: AgentSpec): string {
-    return buildTaskPrompt(spec)
+    return process.env.OPENCODE_BIN?.trim() || 'opencode'
   }
 
   async start(spec: AgentSpec): Promise<string> {
     const sessionId = `${spec.runId}-${spec.taskId}-${Date.now()}`
-    const prompt = this.buildPrompt(spec)
-
-    const model = spec.variant ? `${spec.model}#${spec.variant}` : spec.model
     const proc = Bun.spawn(
-      [this.executable(), 'run', '--agent', spec.role, '--model', model, prompt],
+      [this.executable(), ...buildAgentArguments(spec)],
       {
       cwd: spec.worktree,
       env: {

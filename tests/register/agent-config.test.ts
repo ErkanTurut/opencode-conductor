@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'bun:test'
-import { inspectAgentConfigs, parseAgentMarkdown, registerAgents } from '../../src/register/agents'
+import { inspectAgentConfigs, parseAgentMarkdown, registerAgents, type MutableAgentConfig } from '../../src/register/agents'
 
 describe('native agent config', () => {
+  it('never applies a competing fleet fallback to a model-less native agent', async () => {
+    const target: MutableAgentConfig = {}
+    const definition = parseAgentMarkdown('a.md', '---\nsteps: 3\n---\nA')
+    await registerAgents({ agent: { transform: cb => cb({ get: () => undefined, update: (_id, apply) => apply(target), default: () => {} }) } }, [definition], { fleet: { models: { a: 'hidden/model' }, defaults: { fallbackModel: 'hidden/fallback' } } })
+    expect(target.model).toBeUndefined()
+  })
   it('parses expanded model and ordered native permission rules', () => {
     const agent = parseAgentMarkdown('reviewer.md', `---
 model:

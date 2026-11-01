@@ -6,8 +6,8 @@
 // so other plugins and clients can import the token without loading the
 // conductor runtime.
 //
-// All methods are read-only in v1. Inputs are small, project-scoped
-// identifiers; a method never accepts an arbitrary filesystem path.
+// Run projections are read-only. Explicit configuration saves use fixed server
+// targets and revision checks; no method accepts an arbitrary filesystem path.
 
 import { Rpc } from '@opencode/plugin/rpc'
 
@@ -51,6 +51,20 @@ export const ConductorRpc = Rpc.define({
     /** Native agent configuration and source provenance, without provider credentials. */
     configuration: {
       input: empty,
+      output: envelope,
+    },
+    agentDocument: {
+      input: object({ scope: { enum: ['project', 'global'] }, agentId: string }, ['scope', 'agentId']),
+      output: envelope,
+    },
+    saveAgentConfiguration: {
+      input: object({ scope: { enum: ['project', 'global'] }, agentId: string, expectedRevision: string,
+        fields: { type: 'object', additionalProperties: true } }, ['scope', 'agentId', 'expectedRevision', 'fields']),
+      output: envelope,
+    },
+    projectSettings: { input: empty, output: envelope },
+    saveProjectSettings: {
+      input: object({ expectedRevision: string, settings: { type: 'object', additionalProperties: true } }, ['expectedRevision', 'settings']),
       output: envelope,
     },
     /** Project governance configuration and explicitly reported integration capabilities. */
@@ -166,6 +180,46 @@ export interface ConfigurationData {
   skillPolicy: string
 }
 
+export type ConfigurationScope = 'project' | 'global'
+export interface ConfigurationPermission { action: string; resource: string; effect: 'allow' | 'ask' | 'deny' }
+export interface AgentConfigurationFields {
+  model: string
+  steps: number | null
+  system: string
+  permissions: ConfigurationPermission[]
+}
+export interface AgentConfigurationDocument {
+  agentId: string
+  scope: ConfigurationScope
+  target: string
+  revision: string
+  fields: AgentConfigurationFields
+  writable: boolean
+  warnings: string[]
+}
+export interface ProjectSettings {
+  branches: { main: string; dev: string }
+  verificationCommands: string[]
+  preview: { provider: 'vercel' | 'other' | 'none'; url: string; branch: string }
+  memory: { enabled: boolean }
+}
+export interface ProjectSettingsDocument {
+  target: string
+  revision: string
+  settings: ProjectSettings | null
+  warnings: string[]
+}
+
+export interface PreviewAwareness {
+  provider: 'vercel' | 'other' | 'none' | 'unknown'
+  configured: boolean
+  url: string | null
+  branch: string
+  sources: string[]
+  deploymentVerified: false
+  guidance: string[]
+}
+
 export interface ProjectData {
   projectRoot: string
   branches: { main: string; dev: string } | null
@@ -183,6 +237,7 @@ export interface ProjectData {
   policySource: string
   capabilities: { mergeExecutor: 'unavailable'; previewAdapter: 'unavailable'; remoteProtection: 'unknown' }
   warnings: string[]
+  preview?: PreviewAwareness
 }
 
 export interface RunSummary {

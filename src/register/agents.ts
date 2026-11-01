@@ -1,26 +1,7 @@
-// Agent roster registration for the global plugin entry.
-//
-// Two things are true at once, and this module is built around the pair:
-//
-//   1. A plugin *can* create an agent by calling `editor.update(id, mutate)`
-//      with an id that does not exist yet. That is observed behaviour of the
-//      runtime, not a documented API (see `runtime/compat.ts`'s probe and
-//      `tests/probes/agent-transform-probe.ts`). On OpenCode 2.1.3 it is not
-//      used by default: the transform reshapes config reads (commands fail
-//      `Command.list` schema validation) and keeps re-writing the watched
-//      config directory. It stays available behind `transform: true` for
-//      tests and experiments.
-//   2. A V2 agent file in the user's global `opencode/agents/` directory is
-//      the documented, restart-proof way to define an agent. Files are the
-//      registration path, and `materializeAgentFiles` skips unchanged files so
-//      a run costs no writes.
-//
-// Nothing here throws — a failure is a warning, because an agent roster is an
-// enhancement and must never take the supervisor's tools down with it.
-//
-// The roster itself lives in `assets/agents/*.md` (verbatim copies of the
-// project's agent definitions) and the role→model mapping lives in
-// `assets/fleet.json`, so a model change is a one-line edit in one file.
+// Register packaged Markdown defaults in memory through OpenCode V2 transforms.
+// Existing native agents are authoritative. Fleet catalogs never select models
+// here; native Markdown/JSONC owns configuration. Materialization is an explicit
+// compatibility fallback only. Failures warn without disabling supervisor tools.
 //
 // Import note: imports are extensionless because the package's `tsc --noEmit`
 // baseline rejects `.ts`-suffixed specifiers (TS5097).
@@ -129,7 +110,7 @@ export interface RegisterAgentsOptions {
   env?: Record<string, string | undefined>
   /** Global config dir; defaults to `XDG_CONFIG_HOME/opencode` or `~/.config/opencode`. */
   configDir?: string | null
-  /** The fleet whose models/fallback decide the unknown-model policy. */
+  /** @deprecated Migration compatibility only; never selects agent models. */
   fleet?: FleetConfig | null
   /**
    * Register through `ctx.agent.transform`. On by default for OpenCode 2.2+.
@@ -289,12 +270,6 @@ export const ENV_READ_DENY: Readonly<PermissionRule> = {
   effect: 'deny',
 }
 
-const EFFECT_ORDER: Readonly<Record<PermissionEffect, number>> = {
-  deny: 0,
-  ask: 1,
-  allow: 2,
-}
-
 /**
  * Normalise an effect value. An unrecognised value becomes `ask`, never
  * `allow`: a typo in a permission file must not silently grant a capability.
@@ -315,11 +290,9 @@ function mapPermissionAction(source: string): string | null {
 /**
  * Map a frontmatter `permission` block into runtime rules.
  *
- * Within one action the runtime evaluates the first match, so the order
- * matters: `deny` before `ask` before `allow`, preserving the file's order
- * inside each effect group. That makes the narrow denial (`git push*: deny`)
- * win over the broad allowance (`*: allow`) regardless of how the block was
- * written.
+ * OpenCode V2 evaluates the last matching rule. Preserve source order, with
+ * broad defaults before exceptions, rather than sorting by effect (which
+ * would put a broad allowance after the denials and accidentally permit it).
  */
 export function mapPermissionBlock(block: FrontmatterMap | undefined): PermissionRule[] {
   if (!block) return []
@@ -343,8 +316,6 @@ export function mapPermissionBlock(block: FrontmatterMap | undefined): Permissio
       }
     }
 
-    // `Array.prototype.sort` is stable, so equal effects keep file order.
-    actionRules.sort((left, right) => EFFECT_ORDER[left.effect] - EFFECT_ORDER[right.effect])
     rules.push(...actionRules)
   }
 
@@ -465,7 +436,7 @@ export function parseAgentMarkdown(fileName: string, markdown: string): AgentDef
  */
 export function resolveAssetsDir(moduleDir: string): string {
   const beside = join(moduleDir, 'assets')
-  if (nodeFs.existsSync(join(beside, 'fleet.json'))) return beside
+  if (nodeFs.existsSync(join(beside, 'agents'))) return beside
   return join(moduleDir, '..', 'assets')
 }
 
@@ -496,15 +467,13 @@ export function resolveAgentsDir(assetsDir: string): string {
 }
 
 /**
- * Load every agent definition from `assetsDir` and apply the fleet's model
- * overrides by id. Deterministic order (file name), so registration and the
- * materialised file set are stable between runs.
+ * Load native Markdown defaults in deterministic filename order. The legacy
+ * fleet argument is accepted for callers migrating away from it, never applied.
  */
-const legacyDefinitions = new WeakSet<AgentDefinition>()
 
 export function loadAgentDefinitions(
   assetsDir: string,
-  fleet: FleetConfig | null = null,
+  _fleet: FleetConfig | null = null,
 ): AgentDefinition[] {
   const agentsDir = resolveAgentsDir(assetsDir)
   const files = nodeFs
@@ -516,17 +485,6 @@ export function loadAgentDefinitions(
   for (const file of files) {
     const markdown = nodeFs.readFileSync(join(agentsDir, file), 'utf8')
     const definition = parseAgentMarkdown(file, markdown)
-
-    const entry = fleet?.models?.[definition.id]
-    if (!definition.model && entry !== undefined) {
-      const reference = typeof entry === 'string' ? entry : entry.model
-      const variant = typeof entry === 'string' ? undefined : entry.variant
-      const override = parseModelRef(reference, variant)
-      if (override) {
-        definition.model = override
-        legacyDefinitions.add(definition)
-      }
-    }
 
     definitions.push(definition)
   }
@@ -594,9 +552,9 @@ export function inspectAgentConfigs(definitions: readonly AgentDefinition[], nat
     const host = native[definition.id]
     const pick = <K extends 'description' | 'mode' | 'system' | 'model' | 'steps' | 'permissions'>(key: K) => host ? host[key] : definition[key]
     const source = (key: 'description' | 'mode' | 'system' | 'model' | 'steps' | 'permissions'): AgentFieldSource =>
-      host ? (host[key] !== undefined ? 'native' : 'absent') : definition[key] === undefined ? 'absent' : key === 'model' && legacyDefinitions.has(definition) ? 'legacy-fleet' : 'packaged-md'
+      host ? (host[key] !== undefined ? 'native' : 'absent') : definition[key] === undefined ? 'absent' : 'packaged-md'
     const model = pick('model') as AgentModelRef | undefined
-    const warnings = legacyDefinitions.has(definition) && !host ? [`${definition.id}: legacy fleet model fallback; migrate it to native agent configuration`] : []
+    const warnings: string[] = []
     return {
       id: definition.id, description: pick('description') ?? '', mode: pick('mode') ?? '',
       system: pick('system') ?? '',
@@ -630,10 +588,8 @@ function applyDefinition(agent: MutableAgentConfig, definition: AgentDefinition)
 /**
  * Register the roster.
  *
- * Files are the registration path: by default the roster is materialised as V2
- * markdown and no runtime transform runs. `transform: true` additionally
- * registers through `ctx.agent.transform` (kept for tests/experiments; it
- * destabilises the config location on OpenCode 2.1.3).
+ * Runtime transforms are the default. Native agents already present in the
+ * host are left unchanged; files are written only with explicit materialize.
  *
  * Never throws. Every failure is a `warnings` entry and the remaining work
  * continues: one agent the runtime refuses must not cost the other fourteen,
@@ -648,16 +604,8 @@ export async function registerAgents(
   const registered: string[] = []
   const materialized: string[] = []
 
-  const resolved = definitions.map((definition) => {
-    if (definition.model) return definition
-    const entry = options.fleet?.models?.[definition.id]
-    const model = entry ? parseModelRef(typeof entry === 'string' ? entry : entry.model, typeof entry === 'string' ? undefined : entry.variant) : parseModelRef(options.fleet?.defaults?.fallbackModel)
-    if (!model) return definition
-    const result = { ...definition, model }
-    legacyDefinitions.add(result)
-    return result
-  })
-  warnings.push(...inspectAgentConfigs(resolved).flatMap((agent) => agent.warnings))
+  // Kept as a compatibility input for explicit migration tools, never an authority.
+  const resolved = [...definitions]
 
   const defaultAgent = resolved.some((definition) => definition.id === DEFAULT_AGENT_ID)
     ? DEFAULT_AGENT_ID

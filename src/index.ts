@@ -62,11 +62,11 @@ export * from './runtime/detect'
 import { join } from 'node:path'
 import { Plugin } from '@opencode/plugin'
 import { readCtxOptions, resolveSupervisorConfig, registerSupervisorTools, type ToolRegistrar } from './plugin'
+import { loadProjectSettings } from './runtime/configuration-store'
 import { registerConductorTools, isReadOnlySupervisorTool } from './register/tools'
 import { registerConductorRpc } from './rpc/register'
 import {
   loadAgentDefinitions,
-  loadFleetConfig,
   nodeMaterializeFs,
   registerAgents,
   resolveAgentConfigDir,
@@ -82,6 +82,7 @@ import {
 } from './runtime/compat'
 import {
   resolvePolicyAuthority,
+  isAuthorityIntact,
   type PolicyAuthoritySnapshot,
 } from './runtime/policy-authority'
 import { resolveProjectIdentity } from './runtime/project'
@@ -234,7 +235,7 @@ export interface ConductorSetupOptions {
  * This runs on the probe-success path only: a runtime that cannot run the
  * supervisor must not advertise fifteen agents that depend on it. The roster is
  * built from the package's own assets (`assets/agents/*.md`, models from
- * `assets/fleet.json`) and registered through `ctx.agent.transform` by
+     * native Markdown) and registered through `ctx.agent.transform` by
  * `register/*.ts`, which already turns every failure into a warning instead of
  * an exception.
  *
@@ -253,16 +254,9 @@ async function registerAgentRoster(
   const warnings: string[] = []
   try {
     const assetsDir = resolveAssetsDir(import.meta.dir)
-    const fleet = loadFleetConfig(assetsDir)
-    if (!fleet) {
-      console.error(
-        `[conductor] no readable fleet config at ${assetsDir}/fleet.json; agents keep their file models`,
-      )
-    }
-    const definitions = loadAgentDefinitions(assetsDir, fleet)
+    const definitions = loadAgentDefinitions(assetsDir)
     const result = await registerAgents(ctx, definitions, {
       env,
-      fleet,
       transform: true,
       materialize: env[MATERIALIZE_ENV_VAR] === '1',
       setDefault: env.CONDUCTOR_SET_DEFAULT_AGENT === '1',
@@ -405,14 +399,18 @@ export async function setupConductor(
 
   // Fail-closed: a missing/ambiguous grant means the mutating tools refuse.
   const trust = resolveTrust({ projectRoot, env })
+  // Project settings are operational preferences, never authority grants.
+  // Malformed explicit settings stop activation rather than silently running
+  // against a different branch or skipping the expected verification profile.
+  const projectSettings = loadProjectSettings(projectRoot)
 
   // The resolved layout (central or local) and the authority's shell rules are
   // carried into the runtime: run projections land in `runsDir`, and the verify
   // gate consults the same shell authority.
   const runtime = resolveSupervisorConfig({
     ctxOptions: readCtxOptions(ctx),
-    detectedBranches: identity.record.branch,
-    detectedVerifyProfile: identity.record.verify?.commands ?? [],
+    detectedBranches: projectSettings?.branches ?? identity.record.branch,
+    detectedVerifyProfile: projectSettings?.verificationCommands ?? identity.record.verify?.commands ?? [],
     options: {
       repoRoot: projectRoot,
       ledgerPath: identity.layout.ledgerPath,
@@ -454,8 +452,19 @@ export async function setupConductor(
     policyRestricted: authority.restricted,
     assetsDir,
     branches: runtime.branches,
-    verificationCommands: identity.record.verify?.commands ?? [],
+    verificationCommands: runtime.verifyProfile,
     governance: ctx.options?.governance,
+    configDir: resolveAgentConfigDir(env) ?? undefined,
+    globalDirectory: env.HOME,
+    configurationAuthorityIntact: () => isAuthorityIntact(authority) && resolveTrust({ projectRoot, env }).trusted,
+    onProjectSettingsSaved(settings) {
+      // Existing registrations retain these object/array references. Explicit
+      // options and environment still win, exactly as they do at startup.
+      const updated = resolveSupervisorConfig({ ctxOptions: readCtxOptions(ctx), env,
+        detectedBranches: settings.branches, detectedVerifyProfile: settings.verificationCommands })
+      Object.assign(runtime.branches, updated.branches)
+      runtime.verifyProfile.splice(0, runtime.verifyProfile.length, ...updated.verifyProfile)
+    },
   })
 }
 

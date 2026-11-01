@@ -13,10 +13,10 @@ OpenCode Desktop 2.2.x
 │   └─ RPC: ctx.rpc.register(ConductorRpc)
 │
 ├─ RPC contract (src/rpc-contract.ts)
-│   └─ ten read-only methods over the ledger + run artifacts
+│   └─ twelve read-only methods over ledger, run artifacts, and safe config snapshots
 │
 └─ GUI bundle (dist/gui-experimental.cjs)
-    ├─ Panel: six tabs
+    ├─ Panel: eight tabs
     ├─ Command: conductor.open
     ├─ MenuItem: + / New tab launcher
     └─ ctx.client.rpc(ConductorRpc) with the session directory
@@ -91,15 +91,17 @@ legacy attempt states become empty/`unknown` values, never exceptions.
 - returns `{ ok: true, data }` or `{ ok: false, error: { code, message } }`;
 - is wrapped in `try/catch` so a corrupt row cannot take the server down.
 
-Ten methods:
+Twelve methods:
 
 | Method | Kind | Input | Output |
 | --- | --- | --- | --- |
 | `workspace` | read | `{}` | project identity, layout, trust, policy, counts |
+| `configuration` | read | `{}` | allowlisted host-resolved agent settings, sources, model catalog |
+| `project` | read | `{}` | detected branches, verification profile, governance and explicit capability status |
 | `runs` | read | `{ limit?, cursor?, states? }` | run summaries + cursor |
 | `run` | read | `{ runId }` | summary, contract, budget, plan, tasks, attempts, leases, approvals |
 | `dag` | read | `{ runId }` | nodes, edges, layers, roots/leaves, dangling ids, cycles, depth |
-| `gates` | read | `{ runId }` | approvals, per-task verification evidence, findings, merge-ready |
+| `gates` | read | `{ runId }` | approvals, per-task verification evidence, findings, non-authoritative evidence readiness |
 | `refinements` | read | `{ runId }` | state, uncertainties, Q&A, requirements, refinement events |
 | `memory` | read | `{ limit? }` | block summaries |
 | `memoryBlock` | read | `{ label, version? }` | full block |
@@ -123,7 +125,7 @@ method returns the project's ledger and runs when the location is present.
 
 `src/gui.tsx` is the default export (`Plugin.define` from `@opencode/plugin/gui`). It registers:
 
-- `Panel` id `conductor`, side region, six tabs in one `group: "conductor"` render;
+- `Panel` id `conductor`, side region, eight tabs in one `group: "conductor"` render;
 - `Command` id `open` (`conductor.open`) to toggle the panel;
 - `MenuItem` `session.panel` to make the panel appear in the **+ / New tab** launcher;
 - `Style` with the panel CSS.
@@ -132,7 +134,7 @@ method returns the project's ledger and runs when the location is present.
 
 - selected run signal, polling every 3 seconds, loading/error/empty states;
 - one RPC client per call with the session location;
-- a `Switch` over the six tab ids.
+- a `Switch` over the eight tab ids.
 
 Views are pure render functions over the RPC shapes. `format.ts`, `data.ts`, and `dag-layout.ts`
 are pure helpers and are unit-tested without a DOM.

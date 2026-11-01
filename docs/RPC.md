@@ -41,10 +41,12 @@ message; it never throws on a bad run id or a missing database.
 | Method | Input | Data |
 | --- | --- | --- |
 | `workspace` | `{}` | `projectRoot`, `projectKey`, `mode`, `ledgerPath`, `runsDir`, `memoryDir`, `trusted`, `policyRestricted`, `counts` |
+| `configuration` | `{}` | host-resolved agent allowlist and provenance, model catalog, warnings; native system text is withheld |
+| `project` | `{}` | detected branches, verification profile, policy snapshot and explicit unavailable integration capabilities |
 | `runs` | `{ limit?: number; cursor?: string; states?: string[] }` | `runs: RunSummary[]`, `nextCursor` |
 | `run` | `{ runId: string }` | summary, contract, budget, plan, tasks, attempts, leases, approvals, eventCount, runDir |
 | `dag` | `{ runId: string }` | nodes, edges, layers, roots, leaves, dangling, cycles, maxDepth, maxDepthBudget |
-| `gates` | `{ runId: string }` | approvals, per-task verification evidence, findings, mergeReady |
+| `gates` | `{ runId: string }` | approvals, per-task verification evidence, findings, non-authoritative evidence readiness (`mergeReady` remains false) |
 | `refinements` | `{ runId: string }` | state, uncertainties, Q&A, requirementsPath/Markdown, contract, events |
 | `memory` | `{ limit?: number }` | `blocks: MemoryBlockSummary[]`, `total` |
 | `memoryBlock` | `{ label: string; version?: number }` | full block: scope, status, confidence, reviewAfter, source artifacts, content, hash |

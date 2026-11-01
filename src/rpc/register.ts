@@ -48,6 +48,8 @@ import {
   type FleetModelEntry,
 } from '../read/projections'
 import type { StateLayout } from '../runtime/state-layout'
+import { buildConfigurationSnapshot, buildProjectSnapshot } from '../read/configuration'
+import { reviewMemory } from '../runtime/memory-review'
 
 // ---------------------------------------------------------------------------
 // Options
@@ -62,6 +64,9 @@ export interface RegisterConductorRpcOptions {
   policyRestricted: boolean
   /** Package assets directory (holds `fleet.json`); null when unresolvable. */
   assetsDir: string | null
+  branches?: { main: string; dev: string }
+  verificationCommands?: string[]
+  governance?: unknown
 }
 
 // ---------------------------------------------------------------------------
@@ -201,6 +206,22 @@ export async function registerConductorRpc(
   const layout = options.layout
 
   const handlers: Record<string, Handler> = {
+    configuration: guarded('configuration', async () => {
+      let native: unknown
+      let models: unknown
+      // Read the host's already-resolved agents; never parse a second native
+      // config hierarchy and never invoke transform/reload from a read method.
+      if (options.trusted && typeof ctx?.agent?.list === 'function') {
+        try { native = await ctx.agent.list() } catch { native = undefined }
+      }
+      if (options.trusted && typeof ctx?.model?.list === 'function') {
+        try { models = await ctx.model.list() } catch { models = undefined }
+      }
+      return okEnvelope(buildConfigurationSnapshot(options.assetsDir, native, models))
+    }),
+
+    project: guarded('project', async () => okEnvelope(buildProjectSnapshot(options))),
+
     workspace: guarded('workspace', async () => {
       return okEnvelope(
         buildWorkspace({
@@ -240,7 +261,7 @@ export async function registerConductorRpc(
       const run = reader.run(runIdGuard.value)
       if (!run) return errorEnvelope('not_found', `run ${runIdGuard.value} not found`)
       return okEnvelope(
-        buildRunDetail({
+        { ...buildRunDetail({
           // A receipt exists on disk long before `receipt_json` is written.
           run: {
             ...run,
@@ -252,7 +273,7 @@ export async function registerConductorRpc(
           approvals: reader.approvals(run.id),
           eventCount: reader.eventCount(run.id),
           runDir: runDirectory(layout.runsDir, run.id),
-        }),
+        }), planRevisions: reader.planRevisions(run.id) },
       )
     }),
 
@@ -315,7 +336,18 @@ export async function registerConductorRpc(
       const limitGuard = optionalNumber(input, 'limit')
       if (!limitGuard.ok) return errorEnvelope('invalid_input', limitGuard.message)
       const limit = clampLimit(limitGuard.value, 200, 1000)
-      return okEnvelope(buildMemory(readMemoryBlocks(layout.memoryDir), limit))
+      const blocks = readMemoryBlocks(layout.memoryDir)
+      const data = buildMemory(blocks, limit)
+      const now = new Date().toISOString()
+      data.blocks.forEach((block, index) => {
+        const source = blocks.find(item => item.label === block.label && item.version === block.version)
+        if (source) data.blocks[index].review = reviewMemory({
+          ...source, confidence: source.confidence ?? undefined, reviewAfter: source.reviewAfter ?? undefined,
+          sourceRunId: source.sourceRunId ?? undefined, contentHash: source.contentHash ?? undefined,
+          supersedes: source.supersedes ?? undefined,
+        }, null, now)
+      })
+      return okEnvelope(data)
     }),
 
     memoryBlock: guarded('memoryBlock', async (input) => {
@@ -334,7 +366,11 @@ export async function registerConductorRpc(
           `memory block ${labelGuard.value}${version !== undefined ? `.v${version}` : ''} not found`,
         )
       }
-      return okEnvelope(buildMemoryBlock(block))
+      return okEnvelope({ ...buildMemoryBlock(block), review: reviewMemory({
+        ...block, confidence: block.confidence ?? undefined, reviewAfter: block.reviewAfter ?? undefined,
+        sourceRunId: block.sourceRunId ?? undefined, contentHash: block.contentHash ?? undefined,
+        supersedes: block.supersedes ?? undefined,
+      }, null, new Date().toISOString()) })
     }),
 
     routing: guarded('routing', async (input) => {

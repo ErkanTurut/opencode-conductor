@@ -1,3 +1,7 @@
+import { scopePrefix, scopesOverlap, validateScopeRoots } from './scope'
+import { createHash } from 'node:crypto'
+import { isAbsolute } from 'node:path'
+import { decideTaskAdmission } from '../runtime/run-safety'
 import { Database } from 'bun:sqlite'
 import { buildSeverityQuestions } from '../jev/questions.js'
 import { calibrateSeverity } from '../jev/gates.js'
@@ -12,6 +16,7 @@ import {
   isTerminalTransition,
 } from '../state-machine'
 import type { RunState } from '../types'
+import { MUTATING_ROLES, READ_ONLY_ROLES, type AgentRole } from '../types'
 import type {
   ILedger,
   CreateRunParams,
@@ -46,8 +51,114 @@ function runIdFromReviewId(reviewId: string): string | null {
   return trimmed.split(':round-')[0] || null
 }
 
+function policyBinding(run: RunRow): string {
+  // A deterministic legacy binding proves only that persisted inputs did not
+  // change, not that any policy came from an authenticated authority.
+  const identity = [run.effective_workflow_hash, run.policy_profile, run.operation_mode, run.risk_class, run.data_class, run.contract_json, run.budget_json, run.plan_json]
+  return (run.effective_workflow_hash ? 'workflow:' : 'legacy:') + createHash('sha256').update(JSON.stringify(identity)).digest('hex')
+}
+
 export class SqliteLedger implements ILedger {
   private db: Database
+
+  async bindAttemptWorkspace(attemptId: string, workItemId: string, fencingToken: number, workspaceId: string | null, baseSha: string): Promise<boolean> {
+    const row = this.db.query(`UPDATE attempts SET workspace_id = ?, base_sha = ? WHERE id = ? AND work_item_id = ? AND state = 'pending' AND EXISTS (SELECT 1 FROM leases WHERE work_item_id = ? AND fencing_token = ? AND released_at IS NULL AND lease_expires_at > ?) RETURNING id`).get(workspaceId, baseSha, attemptId, workItemId, workItemId, fencingToken, new Date().toISOString())
+    return !!row
+  }
+
+  async claimTaskAtomic(params: ClaimLeaseParams & { runId: string; attempt: Omit<CreateAttemptParams, 'attemptNo'> }): Promise<ClaimLeaseResult & { error?: string }> {
+    const deny = (error: string) => ({ claimed: false, fencingToken: -1, error })
+    this.db.run('BEGIN IMMEDIATE')
+    try {
+      const run = this.db.query('SELECT * FROM runs WHERE id = ?').get(params.runId) as RunRow | null
+      const item = this.db.query('SELECT * FROM work_items WHERE id = ? AND run_id = ?').get(params.workItemId, params.runId) as WorkItemRow | null
+      const reject = (reason: string) => { this.db.run('ROLLBACK'); return deny(reason) }
+      if (!run || !item || params.attempt.workItemId !== item.id) return reject('Task or run not found')
+      if (['paused', 'blocked', 'cancelled', 'completed', 'failed', 'timed_out', 'awaiting_refinement', 'awaiting_plan_approval', 'awaiting_merge_approval'].includes(run.state)) return reject('Run is parked or terminal')
+      // Legacy read-only callers can claim pending tasks without invoking the
+      // scheduler. Evaluate their readiness inside this same transaction;
+      // never promote unknown roles or mutating work implicitly.
+      const pendingReadOnly = item.state === 'pending' && READ_ONLY_ROLES.has(item.owner_role)
+      if (item.state !== 'ready' && !pendingReadOnly) return reject('Task is not ready')
+      const now = new Date().toISOString()
+      if (!params.leaseOwner || !Number.isFinite(Date.parse(params.leaseExpiresAt)) || params.leaseExpiresAt <= now) return reject('Invalid lease')
+      let deps: unknown, scopes: unknown, allowed: unknown, budget: any
+      try { deps = JSON.parse(item.dependency_json); scopes = JSON.parse(item.write_scope_json); allowed = JSON.parse(item.allowed_paths_json); budget = JSON.parse(run.budget_json) } catch { return reject('Invalid task or budget data') }
+      if (!Array.isArray(deps) || deps.some(d => typeof d !== 'string') || !Array.isArray(scopes) || scopes.some(s => typeof s !== 'string' || !s.trim())) return reject('Invalid dependencies or scope')
+      if (!Array.isArray(allowed) || allowed.some(path => scopePrefix(path) === null)) return reject('Invalid allowed paths')
+      const rows = this.db.query('SELECT id, state, dependency_json FROM work_items WHERE run_id = ?').all(params.runId) as Array<{ id: string; state: string; dependency_json: string }>
+      let graph
+      try { graph = rows.map(r => ({ id: r.id, state: r.state, dependencies: JSON.parse(r.dependency_json) })) } catch { return reject('Invalid task graph') }
+      const admission = decideTaskAdmission({ tasks: graph.map(t => pendingReadOnly && t.id === item.id ? { ...t, state: 'ready' } : t), taskId: item.id })
+      if (!admission.allowed) return reject(admission.reasons.map(r => r.code).join(', '))
+      const max = budget?.max_attempts_per_task ?? 2
+      if (!Number.isSafeInteger(max) || max < 1 || item.attempts >= max) return reject('Attempt budget exhausted')
+      for (const dep of deps) {
+        const row = this.db.query('SELECT state FROM work_items WHERE id = ? AND run_id = ?').get(dep, params.runId) as { state: string } | null
+        if (!row || row.state !== 'completed') return reject('Dependency missing or unfinished')
+      }
+      const normalizedScopes = (scopes as string[]).map(scopePrefix)
+      if (normalizedScopes.some(x => x === null)) return reject('Invalid write scope')
+      // When repo_id is a path, refuse known symlink aliases before leasing.
+      // Non-path repository identities cannot establish filesystem authority.
+      if (isAbsolute(run.repo_id) && !validateScopeRoots(run.repo_id, [...scopes, ...allowed] as string[])) return reject('Uninspectable or symlink scope')
+      const live = this.db.query(`SELECT w.write_scope_json, w.owner_role FROM work_items w JOIN leases l ON l.work_item_id = w.id WHERE w.run_id = ? AND w.id != ? AND l.released_at IS NULL AND l.lease_expires_at > ?`).all(params.runId, item.id, now) as Array<{ write_scope_json: string; owner_role: string }>
+      for (const other of live) {
+        let paths: unknown
+        try { paths = JSON.parse(other.write_scope_json) } catch { return reject('Invalid active scope') }
+        if (!Array.isArray(paths)) return reject('Invalid active scope')
+        const otherScopes = paths.map(scopePrefix)
+        if (otherScopes.some(p => p === null)) return reject('Invalid active scope')
+        if (MUTATING_ROLES.has(item.owner_role) && MUTATING_ROLES.has(other.owner_role as AgentRole) && (!normalizedScopes.length || !otherScopes.length)) return reject('Unknown active write scope')
+        for (const a of normalizedScopes) for (const b of otherScopes) if (a && b && scopesOverlap(a, b)) return reject('Active write scope collision')
+      }
+      const lease = this.db.query(`UPDATE leases SET lease_owner = ?, lease_expires_at = ?, heartbeat_at = ?, fencing_token = fencing_token + 1, claimed_at = ?, released_at = NULL WHERE work_item_id = ? AND (lease_expires_at IS NULL OR released_at IS NOT NULL OR lease_expires_at <= ?) RETURNING fencing_token`).get(params.leaseOwner, params.leaseExpiresAt, now, now, item.id, now) as { fencing_token: number } | null
+      if (!lease) return reject('Lease unavailable')
+      this.db.run(`UPDATE work_items SET attempts = attempts + 1, state = 'running', updated_at = datetime('now') WHERE id = ?`, [item.id])
+      const a = params.attempt
+      this.db.run(`INSERT INTO attempts (id, work_item_id, attempt_no, harness, model_provider, model_id, model_variant, workspace_id, base_sha) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, [a.id, item.id, item.attempts + 1, a.harness, a.modelProvider, a.modelId, a.modelVariant, a.workspaceId, a.baseSha])
+      let revision = this.db.query('SELECT MAX(revision) AS revision FROM plan_revisions WHERE run_id = ?').get(params.runId) as { revision: number | null }
+      if (revision.revision === null) {
+        this.snapshotPlan(params.runId, 0, 'legacy graph at task admission')
+        revision = { revision: 1 }
+      }
+      this.db.run('UPDATE attempts SET plan_revision = ?, policy_identity = ? WHERE id = ?', [revision.revision, policyBinding(run), a.id])
+      this.db.run('COMMIT')
+      return { claimed: true, fencingToken: lease.fencing_token }
+    } catch (e) { this.db.run('ROLLBACK'); throw e }
+  }
+
+  async finishTaskAtomic(p: { runId: string; workItemId: string; attemptId: string; fencingToken: number; success: boolean; exitCode: number | null; failureClass: string | null; usageJson: string | null; evidenceJson: string | null }): Promise<boolean> {
+    this.db.run('BEGIN IMMEDIATE')
+    try {
+      const now = new Date().toISOString()
+      const valid = this.db.query(`SELECT a.id FROM attempts a JOIN work_items w ON w.id = a.work_item_id JOIN leases l ON l.work_item_id = w.id JOIN runs r ON r.id = w.run_id WHERE a.id = ? AND w.id = ? AND w.run_id = ? AND w.state = 'running' AND a.state = 'pending' AND a.attempt_no = w.attempts AND l.fencing_token = ? AND l.released_at IS NULL AND l.lease_expires_at > ? AND r.state NOT IN ('paused','blocked','cancelled','completed','failed','timed_out','awaiting_refinement','awaiting_plan_approval','awaiting_merge_approval')`).get(p.attemptId, p.workItemId, p.runId, p.fencingToken, now)
+      if (!valid) { this.db.run('ROLLBACK'); return false }
+      if (p.success) {
+        const invalidate = () => {
+          this.db.run(`UPDATE attempts SET state = 'failed', failure_class = 'plan_or_policy_invalidated', evidence_json = ?, finished_at = datetime('now') WHERE id = ?`, [JSON.stringify({ reason: 'plan_or_policy_invalidated', prior_evidence: p.evidenceJson }), p.attemptId])
+          this.db.run(`UPDATE work_items SET state = 'failed', updated_at = datetime('now') WHERE id = ?`, [p.workItemId])
+          this.db.run(`UPDATE leases SET released_at = ? WHERE work_item_id = ? AND fencing_token = ?`, [now, p.workItemId, p.fencingToken])
+          this.db.run(`INSERT INTO events (run_id, work_item_id, attempt_id, event_type, actor, payload_json) VALUES (?, ?, ?, 'attempt_invalidated', 'ledger', ?)`, [p.runId, p.workItemId, p.attemptId, JSON.stringify({ reason: 'plan_or_policy_invalidated' })])
+          this.db.run('COMMIT')
+          return false
+        }
+        const binding = this.db.query(`SELECT a.plan_revision, a.policy_identity, r.* FROM attempts a JOIN work_items w ON w.id = a.work_item_id JOIN runs r ON r.id = w.run_id WHERE a.id = ?`).get(p.attemptId) as (RunRow & { plan_revision: number | null; policy_identity: string | null })
+        const current = this.db.query('SELECT MAX(revision) AS revision FROM plan_revisions WHERE run_id = ?').get(p.runId) as { revision: number | null }
+        // Strict invalidation: any revision change requires a fresh attempt.
+        // Null snapshots from pre-migration attempts are not authoritative.
+        if (binding.plan_revision === null || current.revision === null || binding.plan_revision !== current.revision || !binding.policy_identity || binding.policy_identity !== policyBinding(binding)) return invalidate()
+        const snapshot = this.db.query('SELECT graph_json FROM plan_revisions WHERE run_id = ? AND revision = ?').get(p.runId, binding.plan_revision) as { graph_json: string } | null
+        const graph = this.db.query('SELECT id, title, dependency_json, owner_role, model_slot, write_scope_json, contract_json, allowed_paths_json, read_paths_json, acceptance_criteria_json, verification_commands_json FROM work_items WHERE run_id = ? ORDER BY id').all(p.runId)
+        if (!snapshot || snapshot.graph_json !== JSON.stringify(graph)) return invalidate()
+      }
+      this.db.run(`UPDATE attempts SET state = ?, exit_code = ?, failure_class = ?, usage_json = ?, evidence_json = ?, finished_at = datetime('now') WHERE id = ?`, [p.success ? 'completed' : 'failed', p.exitCode, p.success ? null : p.failureClass, p.usageJson, p.evidenceJson, p.attemptId])
+      this.db.run(`UPDATE work_items SET state = ?, updated_at = datetime('now') WHERE id = ?`, [p.success ? 'completed' : 'failed', p.workItemId])
+      this.db.run(`UPDATE leases SET released_at = ? WHERE work_item_id = ? AND fencing_token = ?`, [now, p.workItemId, p.fencingToken])
+      this.db.run('COMMIT')
+      return true
+    } catch (e) { this.db.run('ROLLBACK'); throw e }
+  }
 
   constructor(path: string) {
     this.db = new Database(path)
@@ -58,6 +169,7 @@ export class SqliteLedger implements ILedger {
   }
 
   private migrate(): void {
+    this.db.run(`CREATE TABLE IF NOT EXISTS plan_revisions (run_id TEXT NOT NULL, revision INTEGER NOT NULL, parent_revision INTEGER, reason TEXT NOT NULL, graph_json TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')), PRIMARY KEY (run_id, revision), FOREIGN KEY (run_id) REFERENCES runs(id))`)
     this.db.run(`
       CREATE TABLE IF NOT EXISTS runs (
         id TEXT PRIMARY KEY NOT NULL,
@@ -144,6 +256,9 @@ export class SqliteLedger implements ILedger {
         FOREIGN KEY (work_item_id) REFERENCES work_items(id)
       )
     `)
+    const attemptColumns = this.db.query('PRAGMA table_info(attempts)').all() as Array<{ name: string }>
+    if (!attemptColumns.some(c => c.name === 'plan_revision')) this.db.run('ALTER TABLE attempts ADD COLUMN plan_revision INTEGER')
+    if (!attemptColumns.some(c => c.name === 'policy_identity')) this.db.run('ALTER TABLE attempts ADD COLUMN policy_identity TEXT')
 
     this.db.run(`
       CREATE TABLE IF NOT EXISTS workspaces (
@@ -384,7 +499,36 @@ export class SqliteLedger implements ILedger {
 
   // --- Work Items ---
 
+  private snapshotPlan(runId: string, expectedRevision: number, reason: string): boolean {
+    const current = this.db.query('SELECT MAX(revision) AS revision FROM plan_revisions WHERE run_id = ?').get(runId) as { revision: number | null }
+    if ((current.revision ?? 0) !== expectedRevision || !reason.trim()) return false
+    const graph = this.db.query('SELECT id, title, dependency_json, owner_role, model_slot, write_scope_json, contract_json, allowed_paths_json, read_paths_json, acceptance_criteria_json, verification_commands_json FROM work_items WHERE run_id = ? ORDER BY id').all(runId)
+    this.db.run('INSERT INTO plan_revisions (run_id, revision, parent_revision, reason, graph_json) VALUES (?, ?, ?, ?, ?)', [runId, expectedRevision + 1, expectedRevision || null, reason, JSON.stringify(graph)])
+    return true
+  }
+
+  async listPlanRevisions(runId: string) {
+    return this.db.query('SELECT * FROM plan_revisions WHERE run_id = ? ORDER BY revision').all(runId) as Array<{ run_id: string; revision: number; parent_revision: number | null; reason: string; graph_json: string; created_at: string }>
+  }
+
+  async snapshotPlanCAS(runId: string, expectedRevision: number, reason: string): Promise<boolean> {
+    this.db.run('SAVEPOINT plan_cas')
+    try {
+      const exists = this.db.query('SELECT id FROM runs WHERE id = ?').get(runId)
+      const ok = !!exists && this.snapshotPlan(runId, expectedRevision, reason)
+      this.db.run('RELEASE plan_cas')
+      return ok
+    } catch (e) { this.db.run('ROLLBACK TO plan_cas'); this.db.run('RELEASE plan_cas'); throw e }
+  }
+
   async createWorkItem(params: CreateWorkItemParams): Promise<WorkItemRow> {
+    this.db.run('SAVEPOINT create_work_item')
+    try {
+    const previous = this.db.query('SELECT MAX(revision) AS revision FROM plan_revisions WHERE run_id = ?').get(params.runId) as { revision: number | null }
+    // Capture a legacy graph before its first modification.
+    let revision = previous.revision ?? 0
+    const existing = this.db.query('SELECT COUNT(*) AS n FROM work_items WHERE run_id = ?').get(params.runId) as { n: number }
+    if (!revision && existing.n) { this.snapshotPlan(params.runId, 0, 'legacy graph before task creation'); revision = 1 }
     const item = this.db
       .query(
         `INSERT INTO work_items (id, run_id, issue_key, title, dependency_json, owner_role, model_slot, priority, write_scope_json, contract_json, allowed_paths_json, read_paths_json, acceptance_criteria_json, verification_commands_json)
@@ -414,7 +558,10 @@ export class SqliteLedger implements ILedger {
       )
       .run(params.id)
 
+    this.snapshotPlan(params.runId, revision, `task created: ${params.id}`)
+    this.db.run('RELEASE create_work_item')
     return item
+    } catch (e) { this.db.run('ROLLBACK TO create_work_item'); this.db.run('RELEASE create_work_item'); throw e }
   }
 
   async getWorkItem(id: string): Promise<WorkItemRow | null> {
@@ -473,13 +620,23 @@ export class SqliteLedger implements ILedger {
     id: string,
     acceptanceCriteriaJson: string,
   ): Promise<WorkItemRow | null> {
-    return (
-      (this.db
+    this.db.run('SAVEPOINT amend_work_item')
+    try {
+      const current = this.db.query('SELECT * FROM work_items WHERE id = ?').get(id) as WorkItemRow | null
+      if (!current) { this.db.run('RELEASE amend_work_item'); return null }
+      const active = this.db.query(`SELECT 1 FROM leases WHERE work_item_id = ? AND released_at IS NULL AND lease_expires_at > ?`).get(id, new Date().toISOString())
+      if (active) throw new Error('Cannot amend actively leased work')
+      let revision = (this.db.query('SELECT MAX(revision) AS revision FROM plan_revisions WHERE run_id = ?').get(current.run_id) as { revision: number | null }).revision ?? 0
+      if (!revision) { this.snapshotPlan(current.run_id, 0, 'legacy graph before amendment'); revision = 1 }
+      const result = (this.db
         .query(
           `UPDATE work_items SET acceptance_criteria_json = ?, updated_at = datetime('now') WHERE id = ? RETURNING *`,
         )
         .get(acceptanceCriteriaJson, id) as WorkItemRow) ?? null
-    )
+      this.snapshotPlan(current.run_id, revision, `acceptance amended: ${id}`)
+      this.db.run('RELEASE amend_work_item')
+      return result
+    } catch (e) { this.db.run('ROLLBACK TO amend_work_item'); this.db.run('RELEASE amend_work_item'); throw e }
   }
 
   // --- Attempts ---

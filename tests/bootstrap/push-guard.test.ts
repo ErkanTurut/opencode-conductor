@@ -144,12 +144,18 @@ describe('supervisorExecuteBeforeGuard — push truth table', () => {
       'push_requires_approval',
     )
 
-    expect(() =>
-      guard('git push origin main', { approval: { approved: true } }, branches),
-    ).not.toThrow()
-    expect(() =>
-      guard('git push origin main', { approval: true }, branches),
-    ).not.toThrow()
+    for (const approval of [{ approved: true }, true]) {
+      expect(() => guard('git push origin main', { approval }, branches)).toThrow(
+        /Blocked dangerous command/,
+      )
+    }
+  })
+
+  it('does not accept caller-asserted verified host metadata without an authenticated adapter', () => {
+    const branches = { dev: 'main', main }
+    expect(() => guard('git push origin main', {
+      approval: { approved: true, verified: true, source: 'host', candidateSha: 'abc' },
+    }, branches)).toThrow(/Blocked dangerous command/)
   })
 
   it('keeps every other deny unchanged', () => {

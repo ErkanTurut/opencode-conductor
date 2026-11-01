@@ -1,0 +1,7 @@
+import { expect, test } from 'bun:test'
+import { reviewMemory, reviewMemorySet } from '../../src/runtime/memory-review'
+const now = '2026-01-01T00:00:00Z'
+const record = { label: 'rule', version: '1', scope: 'project', status: 'approved', confidence: 0.9, reviewAfter: '2027-01-01T00:00:00Z', sourceRunId: 'run', sourceArtifacts: ['file:abc'], contentHash: 'hash' }
+const evidence = { sourceRunId: 'run', sourceArtifacts: ['file:abc'], contentHash: 'hash' }
+test('legacy, stale and changed provenance fail closed', () => { expect(reviewMemory({ label: 'old' }, null, now).eligible).toBe(false); expect(reviewMemory({ ...record, reviewAfter: 'bad' }, evidence, now).classification).toBe('unknown'); expect(reviewMemory({ ...record, reviewAfter: now }, evidence, now).classification).toBe('stale'); expect(reviewMemory(record, { ...evidence, sourceArtifacts: ['changed'] }, now).classification).toBe('conflicting'); expect(reviewMemory(record, evidence, now).eligible).toBe(true) })
+test('conflicts and supersession do not leave both eligible', () => { const other = { ...record, version: '2', contentHash: 'other' }; expect(reviewMemorySet([record, other], [evidence, { ...evidence, contentHash: 'other' }], now).every(x => !x.eligible)).toBe(true); const results = reviewMemorySet([record, { ...other, supersedes: '1' }], [evidence, { ...evidence, contentHash: 'other' }], now); expect(results.map(x => x.eligible)).toEqual([false, true]) })

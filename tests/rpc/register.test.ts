@@ -70,10 +70,12 @@ describe('registerConductorRpc — registration', () => {
     expect(handlerMethods).toEqual(contractMethods)
     expect(handlerMethods).toEqual(
       [
+        'configuration',
         'dag',
         'gates',
         'memory',
         'memoryBlock',
+        'project',
         'refinements',
         'routing',
         'run',

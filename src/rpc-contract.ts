@@ -48,6 +48,16 @@ export const ConductorRpc = Rpc.define({
       input: empty,
       output: envelope,
     },
+    /** Native agent configuration and source provenance, without provider credentials. */
+    configuration: {
+      input: empty,
+      output: envelope,
+    },
+    /** Project governance configuration and explicitly reported integration capabilities. */
+    project: {
+      input: empty,
+      output: envelope,
+    },
     /** Runs for the current project, newest first. */
     runs: {
       input: object(
@@ -134,6 +144,47 @@ export interface WorkspaceData {
   }
 }
 
+export interface ConfigurationAgent {
+  id: string
+  description: string
+  mode: string
+  system: string
+  model: string | null
+  variant: string | null
+  steps: number | null
+  permissions: unknown[]
+  sources: Record<string, string>
+  warnings: string[]
+}
+
+export interface ConfigurationData {
+  agents: ConfigurationAgent[]
+  models?: Array<{ id: string; name: string; variants: string[] }>
+  nativeResolved: boolean
+  readOnly: true
+  warnings: string[]
+  skillPolicy: string
+}
+
+export interface ProjectData {
+  projectRoot: string
+  branches: { main: string; dev: string } | null
+  verificationCommands: string[]
+  policy: {
+    repository: string
+    remotes: string[]
+    targets: string[]
+    operations: string[]
+    requiredChecks: string[]
+    previewProviders: string[]
+    maxObservationAgeMs: number
+  } | null
+  policyHash: string | null
+  policySource: string
+  capabilities: { mergeExecutor: 'unavailable'; previewAdapter: 'unavailable'; remoteProtection: 'unknown' }
+  warnings: string[]
+}
+
 export interface RunSummary {
   id: string
   state: string
@@ -203,6 +254,7 @@ export interface RunDetailData {
   }>
   eventCount: number
   runDir: string | null
+  planRevisions?: Array<{ revision: number; parentRevision: number | null; reason: string; createdAt: string }>
 }
 
 export interface DagNode {
@@ -284,8 +336,16 @@ export interface GatesData {
     blockingFindings: number
     openFindings: number
     passed: boolean | null
+    requiredCommands?: string[]
+    missingCommands?: string[]
   }>
   mergeReady: boolean
+  /** Recorded evidence is not authorization to merge or push. */
+  readiness?: {
+    evidenceReady: boolean
+    authoritative: false
+    reasons: string[]
+  }
 }
 
 export interface RefinementData {
@@ -316,6 +376,14 @@ export interface MemoryBlockSummary {
   sourceRunId: string | null
   contentPreview: string
   updatedAt: string | null
+  review?: MemoryReviewData
+}
+
+export interface MemoryReviewData {
+  classification: 'approved' | 'unknown' | 'unreviewed' | 'stale' | 'conflicting'
+  eligible: boolean
+  reasons: string[]
+  action: 'use' | 'propose_review'
 }
 
 export interface MemoryData {
@@ -336,6 +404,7 @@ export interface MemoryBlockData {
   contentHash: string | null
   actor: string | null
   supersedes: string | null
+  review?: MemoryReviewData
 }
 
 export interface RoutingData {

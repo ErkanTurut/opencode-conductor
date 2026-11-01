@@ -61,7 +61,7 @@ export * from './runtime/detect'
 // ---------------------------------------------------------------------------
 import { join } from 'node:path'
 import { Plugin } from '@opencode/plugin'
-import { resolveSupervisorConfig, registerSupervisorTools, type ToolRegistrar } from './plugin'
+import { readCtxOptions, resolveSupervisorConfig, registerSupervisorTools, type ToolRegistrar } from './plugin'
 import { registerConductorTools, isReadOnlySupervisorTool } from './register/tools'
 import { registerConductorRpc } from './rpc/register'
 import {
@@ -410,6 +410,9 @@ export async function setupConductor(
   // carried into the runtime: run projections land in `runsDir`, and the verify
   // gate consults the same shell authority.
   const runtime = resolveSupervisorConfig({
+    ctxOptions: readCtxOptions(ctx),
+    detectedBranches: identity.record.branch,
+    detectedVerifyProfile: identity.record.verify?.commands ?? [],
     options: {
       repoRoot: projectRoot,
       ledgerPath: identity.layout.ledgerPath,
@@ -450,6 +453,9 @@ export async function setupConductor(
     trusted: trust.trusted,
     policyRestricted: authority.restricted,
     assetsDir,
+    branches: runtime.branches,
+    verificationCommands: identity.record.verify?.commands ?? [],
+    governance: ctx.options?.governance,
   })
 }
 

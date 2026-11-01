@@ -75,7 +75,7 @@ try {
   if (panel.region !== 'side') throw new Error(`panel region is ${panel.region}, expected side`)
 
   const tabs = panel.list({ open: [] }).map((tab) => tab.id)
-  const expectedTabs = ['runs', 'dag', 'gates', 'refinements', 'memory', 'routing']
+  const expectedTabs = ['runs', 'dag', 'gates', 'refinements', 'memory', 'routing', 'agents', 'project']
   if (JSON.stringify(tabs) !== JSON.stringify(expectedTabs)) {
     throw new Error(`tabs are ${JSON.stringify(tabs)}, expected ${JSON.stringify(expectedTabs)}`)
   }

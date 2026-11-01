@@ -321,7 +321,7 @@ describe('the real agent roster', () => {
     })
   })
 
-  it('applies a fleet model override by role id', () => {
+  it('prefers markdown model over legacy fleet by role id', () => {
     const overridden: FleetConfig = {
       ...fleet,
       models: {
@@ -334,8 +334,8 @@ describe('the real agent roster', () => {
 
     expect(coder?.model).toEqual({
       providerID: 'opencode-go',
-      id: 'other-model',
-      variant: 'fast',
+      id: 'deepseek-v4.1-flash',
+      variant: 'max',
     })
     // Untouched roles keep their own model.
     const critic = withOverride.find((definition) => definition.id === 'critic')
@@ -364,6 +364,7 @@ function stubContext(): StubContext {
     agent: {
       transform: async (callback) => {
         const editor: AgentEditor = {
+          get(id) { return agents[id] },
           update(id, apply) {
             const agent: MutableAgentConfig = {}
             apply(agent)
@@ -507,7 +508,7 @@ describe('registerAgents', () => {
     expect(result.registration).toBe('none')
   })
 
-  it('falls back to the fleet default for an unknown model, with a warning', async () => {
+  it('preserves an explicit model outside the fleet', async () => {
     const stub = stubContext()
     const stray: AgentDefinition = {
       id: 'ghost',
@@ -525,13 +526,8 @@ describe('registerAgents', () => {
       transform: true,
     })
 
-    expect(result.warnings).toHaveLength(1)
-    expect(result.warnings[0]).toContain('totally-unknown/ghost-model')
-    expect(result.warnings[0]).toContain('opencode-go/deepseek-v4.1-flash')
-    expect(stub.agents.ghost.model).toEqual({
-      providerID: 'opencode-go',
-      id: 'deepseek-v4.1-flash',
-    })
+    expect(result.warnings).toEqual([])
+    expect(stub.agents.ghost.model).toEqual({ providerID: 'totally-unknown', id: 'ghost-model' })
   })
 
   it('keeps a known provider whose model is not in the fleet', async () => {
@@ -618,11 +614,25 @@ describe('registerAgents', () => {
     expect(result.warnings[0]).toContain('runtime refused the transform')
   })
 
+  it('still permits explicit materialization when editor.get is unavailable', async () => {
+    let updates = 0
+    const result = await registerAgents({ agent: { transform(callback) {
+      callback({ update() { updates++ }, default() {} })
+    } } }, roster, {
+      configDir: tempDir(), env: {}, fs: io, fleet, materialize: true,
+    })
+    expect(updates).toBe(0)
+    expect(result.materialized).toHaveLength(15)
+    expect(result.registration).toBe('files')
+    expect(result.warnings.join(' ')).toContain('editor.get is unavailable')
+  })
+
   it('reports a single failing agent without dropping the rest', async () => {
     const partial: AgentRegistrationContext = {
       agent: {
         transform(callback) {
           const editor: AgentEditor = {
+            get() { return undefined },
             update(id, apply) {
               if (id === 'critic') throw new Error('duplicate id')
               const agent: MutableAgentConfig = {}

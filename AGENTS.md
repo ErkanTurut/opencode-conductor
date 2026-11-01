@@ -19,10 +19,10 @@ This file is the operating guide for an AI agent (or a human) starting a fresh s
 - **Server part** (`index.ts` → `src/index.ts`): `Plugin.define` from `@opencode/plugin`.
   It registers the `supervisor_*` tools, the 15 agents (`ctx.agent.transform`), the 15 skills
   (`ctx.skill.transform`), and the RPC contract (`ctx.rpc.register`).
-- **RPC** (`src/rpc-contract.ts`, `src/rpc/register.ts`): ten read-only methods over the
-  project ledger and run artifacts. The GUI is a client of this contract.
+- **RPC** (`src/rpc-contract.ts`, `src/rpc/register.ts`): twelve read-only methods over the
+  project ledger, run artifacts, and allowlisted configuration snapshots. The GUI is a client of this contract.
 - **GUI** (`src/gui.tsx`, `src/gui/**`, built to `dist/gui-experimental.cjs`): a read-only
-  OpenCode Desktop side panel with Runs, DAG, Gates, Refinements, Memory, and Routing & Timeline.
+  OpenCode Desktop side panel with Runs, DAG, Gates, Refinements, Memory, Routing & Timeline, Agents, and Project.
 - **State** is project-level: `<project>/.opencode/supervisor.db`, `.opencode/runs/`,
   `.opencode/memory/`. A scratch/non-repository directory uses the central home under
   `~/.local/share/opencode-conductor/projects/<slug>-<hash8>/`.
@@ -31,7 +31,7 @@ This file is the operating guide for an AI agent (or a human) starting a fresh s
 
 ```sh
 bun install
-bun test                                   # 855 tests
+bun test                                   # 909 tests
 bun run typecheck                          # baseline-gated server typecheck
 bunx tsc -p tsconfig.gui.json --noEmit     # GUI typecheck
 bun run gui:build                          # dist/gui-experimental.cjs
@@ -63,7 +63,7 @@ const location = () => ({ directory: props.session.directory })
 await rpc().runs({ limit: 50 }, { location: location() })
 ```
 
-Do this for every method: `runs`, `run`, `dag`, `gates`, `refinements`, `memory`,
+Do this for every method: `workspace`, `configuration`, `project`, `runs`, `run`, `dag`, `gates`, `refinements`, `memory`,
 `memoryBlock`, `routing`, `timeline`. The smoke script checks the bundle shape, not location
 wiring; a manual check against a project with runs is still required.
 
@@ -112,7 +112,8 @@ authorization. Tags are prepared locally; the author pushes.
 | `src/rpc/register.ts` | Binds the contract to the readers; feature-detects `ctx.rpc.register`. |
 | `src/gui.tsx` | GUI entry: `Plugin.define`, `Panel`, `Command`, `MenuItem`, `Style`. |
 | `src/gui/panel.tsx` | Fetch loop, polling, selected run, tab switch, session location. |
-| `src/gui/views/*` | Runs, DAG, Gates, Refinements, Memory, Routing & Timeline. |
+| `src/gui/views/*` | Runs, DAG, Gates, Refinements, Memory, Routing & Timeline, Agents, Project. |
+| `src/runtime/{run-safety,plan-revisions,project-governance,memory-review}.ts` | Safety decisions, version snapshots, and review contracts. Some provider/auth decisions remain unintegrated. |
 | `src/gui/format.ts`, `src/gui/data.ts`, `src/gui/dag-layout.ts` | Pure formatting/defensive parsing/DAG geometry. |
 | `assets/agents`, `assets/skills`, `assets/fleet.json` | Runtime roster assets. Must be shipped. |
 | `dist/gui-experimental.cjs` | Built CommonJS GUI bundle; committed for GitHub installs. |

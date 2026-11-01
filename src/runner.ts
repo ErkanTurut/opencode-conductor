@@ -1,3 +1,4 @@
+import { collectWorkspaceChanges, validateChangedFiles, validateWorkspaceBinding } from './ledger/scope'
 // Provenance: the scheduler pre-check wiring (fail-closed DAG + write-scope
 // admission), unified verification dir, and stdout-only verification gate
 // are adapted from the OmO comparison notes (idea 3 — rounds/sweep slot and
@@ -29,7 +30,7 @@ import {
   buildModelRegistry,
   selectFleetModel,
 } from './fleet-config'
-import type { FleetConfig, FleetSelection } from './fleet-config'
+import type { FleetConfig } from './fleet-config'
 import {
   runVerification,
   getArtifactPaths,
@@ -66,7 +67,8 @@ export function parseRecordedVerificationCommands(
   try {
     const parsed = JSON.parse(value)
     if (!Array.isArray(parsed)) return null
-    return parsed.filter((entry): entry is string => typeof entry === 'string')
+    if (parsed.some((entry) => typeof entry !== 'string' || !entry.trim())) return null
+    return parsed
   } catch {
     return null
   }
@@ -446,26 +448,6 @@ export class Runner {
       ...JSON.parse(run.budget_json || '{}'),
     }
 
-    // Claim lease
-    const leaseOwner = `worker-${process.pid}`
-    const leaseExpiry = new Date(
-      Date.now() + budget.max_task_wall_time_ms,
-    ).toISOString()
-
-    const claim = await this.ledger.claimLease({
-      workItemId,
-      leaseOwner,
-      leaseExpiresAt: leaseExpiry,
-    })
-
-    if (!claim.claimed) {
-      return { success: false, error: 'Failed to claim lease' }
-    }
-
-    // Increment attempts and transition to running
-    await this.ledger.incrementWorkItemAttempts(workItemId)
-    await this.ledger.transitionWorkItemState(workItemId, 'running')
-
     // Select model (fleet-config aware: overrides + disabled exclusion)
     const role = item.owner_role as AgentRole
 
@@ -502,14 +484,23 @@ export class Runner {
       ? selectFleetModel(this.modelRegistry, this.fleetConfig, role, { onSelection })
       : selectFleetModel(this.modelRegistry, this.fleetConfig, role)
     if (!selection) {
-      await this.ledger.releaseLease(workItemId, claim.fencingToken)
-      await this.ledger.transitionWorkItemState(workItemId, 'blocked')
       return { success: false, error: 'No available model for role' }
     }
+
+    const attemptId = `att-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    const leaseOwner = `worker-${process.pid}`
+    const leaseExpiry = new Date(Date.now() + (budget.max_task_wall_time_ms ?? DEFAULT_BUDGET.max_task_wall_time_ms)).toISOString()
+    const claim = this.ledger.claimTaskAtomic ? await this.ledger.claimTaskAtomic({
+      runId: item.run_id, workItemId, leaseOwner, leaseExpiresAt: leaseExpiry,
+      attempt: { id: attemptId, workItemId, harness: 'opencode-cli', modelProvider: selection.providerId,
+        modelId: selection.modelId, modelVariant: selection.variant ?? null, workspaceId: null, baseSha: '' },
+    }) : { claimed: false, fencingToken: -1, error: 'Atomic admission unavailable' }
+    if (!claim.claimed) return { success: false, error: claim.error ?? 'Failed to claim lease' }
 
     // Create worktree for mutating tasks
     let worktreeId: string | null = null
     let worktreePath: string = this.config.mainRepoPath
+    let workspaceBaseSha = ''
 
     // Shared role partition (types.ts): only mutating roles get a worktree and
     // only they are held to the non-empty verification gate.
@@ -523,6 +514,7 @@ export class Runner {
 
       try {
         const baseSha = await this.worktrees.resolveBaseSha()
+        workspaceBaseSha = baseSha
 
         const wt = await this.worktrees.createWorktree(
           worktreeId,
@@ -531,27 +523,24 @@ export class Runner {
         )
         worktreePath = wt.path
       } catch (e) {
-        await this.ledger.releaseLease(workItemId, claim.fencingToken)
-        await this.ledger.transitionWorkItemState(workItemId, 'failed')
+        await this.ledger.finishTaskAtomic?.({ runId: item.run_id, workItemId, attemptId, fencingToken: claim.fencingToken, success: false, exitCode: null, failureClass: 'workspace_error', usageJson: null, evidenceJson: null })
         return { success: false, error: `Failed to create worktree: ${e}` }
       }
     }
 
-    // Create attempt
-    const attemptId = `att-${Date.now()}`
-    await this.ledger.createAttempt({
-      id: attemptId,
-      workItemId,
-      attemptNo: item.attempts + 1,
-      harness: 'opencode-cli',
-      modelProvider: selection.providerId,
-      modelId: selection.modelId,
-      modelVariant: selection.variant ?? null,
-      workspaceId: worktreeId,
-      baseSha: worktreePath
-        ? (await Bun.$`git -C ${worktreePath} rev-parse HEAD`.text()).trim()
-        : '',
-    })
+    try {
+      // Read-only tasks can run in non-git directories; no source base is
+      // asserted there. Mutating work always requires a real git base.
+      if (isMutating) {
+        const workspace = worktreeId ? await this.ledger.getWorkspace(worktreeId) : null
+        if (!workspace || workspace.base_sha !== workspaceBaseSha || !(await validateWorkspaceBinding(this.config.mainRepoPath, workspace, canonicalWorktreeId(workItemId), canonicalWorktreeBranch(workItemId), true))) throw new Error('Authoritative task workspace binding unavailable')
+      }
+      const bound = await this.ledger.bindAttemptWorkspace?.(attemptId, workItemId, claim.fencingToken, worktreeId, workspaceBaseSha)
+      if (!bound) throw new Error('Stale attempt or workspace binding unavailable')
+    } catch (error) {
+      await this.ledger.finishTaskAtomic?.({ runId: item.run_id, workItemId, attemptId, fencingToken: claim.fencingToken, success: false, exitCode: null, failureClass: 'workspace_error', usageJson: null, evidenceJson: null })
+      return { success: false, error: `Failed to bind task workspace: ${error}` }
+    }
 
     // Start heartbeat
     this.watchdog.startHeartbeat(workItemId, claim.fencingToken)
@@ -676,19 +665,32 @@ export class Runner {
           ? false
           : verificationSkipped
             ? true
-            : hasVerificationCommands && verificationResults.every((r) => r.passed)
-        const completed = resultResult.exitCode === 0 && allPassed
+            : hasVerificationCommands && verificationResults.length === verificationCommands.length && verificationResults.every((r) => r.passed)
+        let changedFiles: string[] = []
+        let scopeError: string | null = null
+        if (isMutating) {
+          try {
+            const attempt = await this.ledger.getAttempt(attemptId)
+            const workspace = worktreeId ? await this.ledger.getWorkspace(worktreeId) : null
+            if (!attempt || !workspace || attempt.workspace_id !== worktreeId || attempt.base_sha !== workspace.base_sha || !(await validateWorkspaceBinding(this.config.mainRepoPath, workspace, canonicalWorktreeId(workItemId), canonicalWorktreeBranch(workItemId), false))) throw new Error('workspace binding unavailable')
+            changedFiles = await collectWorkspaceChanges(worktreePath, attempt?.base_sha ?? '')
+            const writeScopes = JSON.parse(item.write_scope_json)
+            if (!Array.isArray(writeScopes) || !Array.isArray(allowedPaths)) throw new Error('invalid scope data')
+            scopeError = validateChangedFiles(worktreePath, changedFiles, writeScopes, allowedPaths)
+          } catch { scopeError = 'scope_evidence_unavailable' }
+        }
+        const completed = resultResult.exitCode === 0 && allPassed && !scopeError
         // The empty-profile failure class is reserved for MUTATING roles and
         // unresolvable records: a read-only task that declares no commands but
         // exits non-zero is an ordinary `exit_nonzero`, never a
         // missing-verification-profile failure.
         const failureClass = completed
           ? null
-          : verificationUnresolved || (!hasVerificationCommands && isMutating)
+          : scopeError ?? (verificationUnresolved || (!hasVerificationCommands && isMutating)
             ? 'no_verification_commands'
             : allPassed
               ? 'exit_nonzero'
-              : 'verification_failed'
+              : verificationResults.some(r => r.exitCode === 124) ? 'infrastructure_timeout_or_exit_124' : 'verification_failed')
 
         // Get evidence
         const evidence = {
@@ -698,25 +700,20 @@ export class Runner {
           duration_ms: resultResult.durationMs,
           usage: resultResult.usage,
           verification_results: verificationResults,
-          all_checks_passed: allPassed,
+          all_checks_passed: allPassed && !scopeError,
           verification_skipped: verificationSkipped,
           failure_class: failureClass,
-          changed_files: worktreeId
-            ? await this.worktrees.getChangedFiles(worktreeId)
-            : [],
+          changed_files: changedFiles,
+          scope_enforcement: isMutating ? (scopeError ?? 'checked') : 'not_applicable',
         }
 
-        await this.ledger.completeAttempt(
-          attemptId,
-          resultResult.exitCode,
-          resultResult.usage ? JSON.stringify(resultResult.usage) : null,
-          null,
-          null,
-          JSON.stringify(evidence),
-        )
+        const recorded = await this.ledger.finishTaskAtomic?.({ runId: item.run_id, workItemId, attemptId,
+          fencingToken: claim.fencingToken, success: completed, exitCode: resultResult.exitCode,
+          failureClass, usageJson: resultResult.usage ? JSON.stringify(resultResult.usage) : null,
+          evidenceJson: JSON.stringify(evidence) })
+        if (!recorded) return { success: false, error: 'Stale attempt or fencing token' }
 
         if (completed) {
-          await this.ledger.transitionWorkItemState(workItemId, 'completed')
           // Read-only tasks with no commands: record that the gate was skipped
           // rather than silently passing an empty profile.
           if (verificationSkipped) {
@@ -743,7 +740,6 @@ export class Runner {
             payloadJson: JSON.stringify({ from: 'running', to: 'completed' }),
           })
         } else {
-          await this.ledger.transitionWorkItemState(workItemId, 'failed')
           await this.ledger.appendEvent({
             runId: item.run_id,
             workItemId,
@@ -785,20 +781,20 @@ export class Runner {
         })
       }
 
-      await this.ledger.failAttempt(
-        attemptId,
-        resultResult.exitCode !== 0 ? 'exit_nonzero' : 'unknown',
-        resultResult.exitCode,
-        resultResult.usage ? JSON.stringify(resultResult.usage) : null,
-        null,
-      )
-
-      await this.ledger.transitionWorkItemState(workItemId, 'failed')
+      const recorded = await this.ledger.finishTaskAtomic?.({ runId: item.run_id, workItemId, attemptId,
+        fencingToken: claim.fencingToken, success: false, exitCode: resultResult.exitCode,
+        failureClass: resultResult.exitCode !== 0 ? 'exit_nonzero' : 'unknown',
+        usageJson: resultResult.usage ? JSON.stringify(resultResult.usage) : null, evidenceJson: null })
+      if (!recorded) return { success: false, error: 'Stale attempt or fencing token' }
 
       return {
         success: false,
         error: resultResult.stderr || 'Task execution failed',
       }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      await this.ledger.finishTaskAtomic?.({ runId: item.run_id, workItemId, attemptId, fencingToken: claim.fencingToken, success: false, exitCode: null, failureClass: /timed?\s*out|timeout/i.test(message) ? 'infrastructure_timeout' : 'verification_or_runtime_error', usageJson: null, evidenceJson: JSON.stringify({ error: message }) })
+      return { success: false, error: message }
     } finally {
       // Lease release is unconditional: success, failure, or throw.
       this.watchdog.stopHeartbeat(workItemId)
@@ -828,6 +824,10 @@ export class Runner {
     if (item.state === 'running') {
       throw new Error(`retryNode: node ${workItemId} is already running`)
     }
+    const run = await this.ledger.getRun(item.run_id)
+    let maxAttempts = DEFAULT_BUDGET.max_attempts_per_task
+    try { maxAttempts = JSON.parse(run?.budget_json ?? '{}').max_attempts_per_task ?? maxAttempts } catch { throw new Error('retryNode: invalid budget') }
+    if (!Number.isSafeInteger(maxAttempts) || maxAttempts < 1 || item.attempts >= maxAttempts) throw new Error('retryNode: attempt budget exhausted')
 
     const previous = await this.ledger.getLatestAttempt(workItemId)
     const inputsHash = String(

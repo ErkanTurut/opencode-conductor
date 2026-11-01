@@ -114,6 +114,7 @@ export interface MutableAgentConfig {
 export interface AgentEditor {
   update(id: string, apply: (agent: MutableAgentConfig) => void): void
   default(id: string): void
+  get?(id: string): MutableAgentConfig | undefined
 }
 
 /** The part of `ctx` agent registration needs. Everything is optional. */
@@ -239,6 +240,7 @@ export function parseModelRef(
   const base = hash === -1 ? raw : raw.slice(0, hash)
   const inlineVariant = hash === -1 ? undefined : raw.slice(hash + 1)
 
+  if ((hash !== -1 && (!inlineVariant || inlineVariant.includes('#'))) || /\s/.test(raw)) return undefined
   const slash = base.indexOf('/')
   if (slash <= 0 || slash === base.length - 1) return undefined
 
@@ -392,11 +394,14 @@ export function parseAgentMarkdown(fileName: string, markdown: string): AgentDef
     }
   }
 
-  const model = parseModelRef(scalar(frontmatter, 'model'), scalar(frontmatter, 'variant'))
+  const modelMap = isMap(frontmatter.model) ? frontmatter.model : undefined
+  const model = modelMap
+    ? parseModelRef(`${scalar(modelMap, 'providerID') ?? ''}/${scalar(modelMap, 'model') ?? ''}`, scalar(modelMap, 'variant'))
+    : parseModelRef(scalar(frontmatter, 'model'), scalar(frontmatter, 'variant'))
 
   const rawSteps = scalar(frontmatter, 'steps')
   const steps =
-    rawSteps !== undefined && /^\d+$/.test(rawSteps.trim())
+    rawSteps !== undefined && /^\d+$/.test(rawSteps.trim()) && Number.isSafeInteger(Number(rawSteps)) && Number(rawSteps) > 0
       ? Number(rawSteps.trim())
       : undefined
 
@@ -406,13 +411,33 @@ export function parseAgentMarkdown(fileName: string, markdown: string): AgentDef
       ? frontmatter.permissions
       : undefined
   const permissions = mapPermissionBlock(permissionBlock)
+  // Native V2 permissions are an ordered sequence, not the legacy map.
+  const nativeLines = lines.slice(opening + 1, lines.findIndex((line, index) => index > opening && line.trim() === '---'))
+  const start = nativeLines.findIndex((line) => /^permissions:\s*$/.test(line))
+  if (start !== -1) {
+    const rules: PermissionRule[] = []
+    let current: Record<string, string> | undefined
+    for (const line of nativeLines.slice(start + 1)) {
+      if (line.trim() && !/^\s/.test(line)) break
+      const match = line.match(/^\s*(?:-\s*)?(action|resource|effect):\s*(.*?)\s*$/)
+      if (!match) continue
+      if (/^\s*-/.test(line)) { current = {}; rules.push(current as unknown as PermissionRule) }
+      if (current) current[match[1]] = unquote(match[2])
+    }
+    if (rules.length) {
+      permissions.length = 0
+      for (const rule of rules) {
+        if (rule.action && rule.resource && ['allow', 'deny', 'ask'].includes(rule.effect)) permissions.push(rule)
+      }
+    }
+  }
 
   // `conductor` may read `.env` to debug a run; every other agent is denied
   // secrets even if its file forgot the rule.
   const hasEnvRule = permissions.some(
     (rule) => rule.action === ENV_READ_DENY.action && rule.resource === ENV_READ_DENY.resource,
   )
-  if (id !== DEFAULT_AGENT_ID && !hasEnvRule) {
+  if (id !== DEFAULT_AGENT_ID && !hasEnvRule && start === -1) {
     permissions.push({ ...ENV_READ_DENY })
   }
 
@@ -475,6 +500,8 @@ export function resolveAgentsDir(assetsDir: string): string {
  * overrides by id. Deterministic order (file name), so registration and the
  * materialised file set are stable between runs.
  */
+const legacyDefinitions = new WeakSet<AgentDefinition>()
+
 export function loadAgentDefinitions(
   assetsDir: string,
   fleet: FleetConfig | null = null,
@@ -491,14 +518,13 @@ export function loadAgentDefinitions(
     const definition = parseAgentMarkdown(file, markdown)
 
     const entry = fleet?.models?.[definition.id]
-    if (entry !== undefined) {
+    if (!definition.model && entry !== undefined) {
       const reference = typeof entry === 'string' ? entry : entry.model
       const variant = typeof entry === 'string' ? undefined : entry.variant
       const override = parseModelRef(reference, variant)
       if (override) {
         definition.model = override
-      } else {
-        delete definition.model
+        legacyDefinitions.add(definition)
       }
     }
 
@@ -548,74 +574,38 @@ function describeError(error: unknown): string {
   return cleaned.length > 0 ? cleaned : 'unknown error'
 }
 
-/** Every model and provider the fleet knows about. */
-function fleetKnowledge(fleet: FleetConfig | null): {
-  providers: Set<string>
-  models: Set<string>
-} {
-  const providers = new Set<string>()
-  const models = new Set<string>()
-
-  for (const entry of Object.values(fleet?.models ?? {})) {
-    const reference =
-      typeof entry === 'string' ? entry : typeof entry?.model === 'string' ? entry.model : undefined
-    const parsed = parseModelRef(reference)
-    if (!parsed) continue
-    providers.add(parsed.providerID)
-    models.add(`${parsed.providerID}/${parsed.id}`)
-  }
-
-  const fallback = parseModelRef(fleet?.defaults?.fallbackModel)
-  if (fallback) providers.add(fallback.providerID)
-
-  return { providers, models }
+export type AgentFieldSource = 'packaged-md' | 'native' | 'legacy-fleet' | 'absent'
+export interface EffectiveAgentConfig {
+  id: string
+  description: string
+  mode: string
+  system: string
+  model?: string
+  variant?: string
+  steps?: number
+  permissions?: PermissionRule[]
+  sources: Record<'description' | 'mode' | 'system' | 'model' | 'variant' | 'steps' | 'permissions', AgentFieldSource>
+  warnings: string[]
 }
 
-/**
- * Decide a definition's effective model.
- *
- * A model the fleet does not know and whose provider the fleet does not know is
- * almost certainly a typo or a provider this install has no credentials for, so
- * it is replaced by `defaults.fallbackModel` and reported. A known provider
- * with an unlisted model is left alone: the fleet is a role map, not an
- * exhaustive model catalogue.
- */
-function resolveModel(
-  definition: AgentDefinition,
-  fleet: FleetConfig | null,
-  warnings: string[],
-): AgentDefinition {
-  const fallback = parseModelRef(fleet?.defaults?.fallbackModel)
-  const fallbackRef = fallback ? `${fallback.providerID}/${fallback.id}` : null
-
-  if (!definition.model) {
-    if (!fallback) {
-      warnings.push(`${definition.id}: no model declared and the fleet has no fallback model`)
-      return definition
+/** Pure, allowlisted inspector. Native values must come from the host, not provider config. */
+export function inspectAgentConfigs(definitions: readonly AgentDefinition[], native: Readonly<Record<string, MutableAgentConfig>> = {}): EffectiveAgentConfig[] {
+  return definitions.map((definition) => {
+    const host = native[definition.id]
+    const pick = <K extends 'description' | 'mode' | 'system' | 'model' | 'steps' | 'permissions'>(key: K) => host ? host[key] : definition[key]
+    const source = (key: 'description' | 'mode' | 'system' | 'model' | 'steps' | 'permissions'): AgentFieldSource =>
+      host ? (host[key] !== undefined ? 'native' : 'absent') : definition[key] === undefined ? 'absent' : key === 'model' && legacyDefinitions.has(definition) ? 'legacy-fleet' : 'packaged-md'
+    const model = pick('model') as AgentModelRef | undefined
+    const warnings = legacyDefinitions.has(definition) && !host ? [`${definition.id}: legacy fleet model fallback; migrate it to native agent configuration`] : []
+    return {
+      id: definition.id, description: pick('description') ?? '', mode: pick('mode') ?? '',
+      system: pick('system') ?? '',
+      ...(model ? { model: `${model.providerID}/${model.id}`, ...(model.variant ? { variant: model.variant } : {}) } : {}),
+      ...(pick('steps') !== undefined ? { steps: pick('steps') as number } : {}),
+      ...(pick('permissions') !== undefined ? { permissions: (pick('permissions') as PermissionRule[]).map(({action, resource, effect}) => ({action, resource, effect})) } : {}),
+      sources: { description: source('description'), mode: source('mode'), system: source('system'), model: source('model'), variant: model?.variant ? source('model') : 'absent', steps: source('steps'), permissions: source('permissions') }, warnings,
     }
-    warnings.push(
-      `${definition.id}: no model declared; using the fleet fallback ${fallbackRef}`,
-    )
-    return { ...definition, model: fallback }
-  }
-
-  const known = fleetKnowledge(fleet)
-  const reference = `${definition.model.providerID}/${definition.model.id}`
-  if (known.models.has(reference) || known.providers.has(definition.model.providerID)) {
-    return definition
-  }
-
-  if (!fallback) {
-    warnings.push(
-      `${definition.id}: unknown model ${reference} and the fleet has no fallback model`,
-    )
-    return definition
-  }
-
-  warnings.push(
-    `${definition.id}: unknown model ${reference}; using the fleet fallback ${fallbackRef}`,
-  )
-  return { ...definition, model: fallback }
+  })
 }
 
 /** Copy a definition onto the mutable object the runtime exposes. */
@@ -658,8 +648,16 @@ export async function registerAgents(
   const registered: string[] = []
   const materialized: string[] = []
 
-  const fleet = options.fleet ?? null
-  const resolved = definitions.map((definition) => resolveModel(definition, fleet, warnings))
+  const resolved = definitions.map((definition) => {
+    if (definition.model) return definition
+    const entry = options.fleet?.models?.[definition.id]
+    const model = entry ? parseModelRef(typeof entry === 'string' ? entry : entry.model, typeof entry === 'string' ? undefined : entry.variant) : parseModelRef(options.fleet?.defaults?.fallbackModel)
+    if (!model) return definition
+    const result = { ...definition, model }
+    legacyDefinitions.add(result)
+    return result
+  })
+  warnings.push(...inspectAgentConfigs(resolved).flatMap((agent) => agent.warnings))
 
   const defaultAgent = resolved.some((definition) => definition.id === DEFAULT_AGENT_ID)
     ? DEFAULT_AGENT_ID
@@ -678,8 +676,18 @@ export async function registerAgents(
       }
 
       await transform.call(agent, (editor: AgentEditor) => {
+        if (typeof editor.get !== 'function') {
+          warnings.push('agent.transform registration skipped: editor.get is unavailable; cannot safely detect existing native agents')
+          return
+        }
         for (const definition of resolved) {
           try {
+            // Existing host agents are authoritative, including explicit empty values.
+            // The host does not expose per-field configuration provenance here.
+            if (editor.get(definition.id)) {
+              registered.push(definition.id)
+              continue
+            }
             editor.update(definition.id, (target) => applyDefinition(target, definition))
             registered.push(definition.id)
           } catch (error) {

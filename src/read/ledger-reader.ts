@@ -470,6 +470,15 @@ export class LedgerReader {
     })
   }
 
+  /** Additive history: an old ledger has no revision table and stays unmodified. */
+  planRevisions(runId: string): Array<{ revision: number; parentRevision: number | null; reason: string; createdAt: string }> {
+    if (typeof runId !== 'string' || runId.length === 0) return []
+    return this.withDb([], db => this.safeAll(db,
+      'SELECT revision, parent_revision, reason, created_at FROM plan_revisions WHERE run_id = ? ORDER BY revision DESC LIMIT 200',
+      [runId],
+    ).map(row => ({ revision: num(row.revision), parentRevision: nullableNum(row.parent_revision), reason: str(row.reason), createdAt: str(row.created_at) })))
+  }
+
   private mapRun(row: Row): LedgerRunRecord {
     return {
       id: str(row.id),

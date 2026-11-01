@@ -67,6 +67,12 @@ export interface ClaimLeaseResult {
 }
 
 export interface ILedger {
+  /** Authoritative atomic admission; unavailable adapters must fail closed. */
+  claimTaskAtomic?(params: ClaimLeaseParams & { runId: string; attempt: Omit<CreateAttemptParams, 'attemptNo'> }): Promise<ClaimLeaseResult & { error?: string }>
+  finishTaskAtomic?(params: { runId: string; workItemId: string; attemptId: string; fencingToken: number; success: boolean; exitCode: number | null; failureClass: string | null; usageJson: string | null; evidenceJson: string | null }): Promise<boolean>
+  listPlanRevisions?(runId: string): Promise<Array<{ run_id: string; revision: number; parent_revision: number | null; reason: string; graph_json: string; created_at: string }>>
+  snapshotPlanCAS?(runId: string, expectedRevision: number, reason: string): Promise<boolean>
+  bindAttemptWorkspace?(attemptId: string, workItemId: string, fencingToken: number, workspaceId: string | null, baseSha: string): Promise<boolean>
   // Transactions
   transaction<T>(fn: (tx: ILedger) => Promise<T> | T): Promise<T>
 

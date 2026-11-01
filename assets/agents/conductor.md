@@ -85,8 +85,8 @@ Then follow this pipeline:
 5. **Review** — Delegate to `critic` (different model family) for diff review, `security-critic` for auth/infra
 6. **Repair** — Max 3 rounds. Fix findings, re-verify, re-review. Stop on repeated failure.
 7. **Integrate** — Delegate to `integrator` in the integration worktree to merge approved task branches into `supervisor/run-<run_id>/integration`, then run full verification
-8. **Finalize (human-gated git flow)** — Ask for merge approval with `question`. Only after explicit approval: at the repo root (checked out on `develop`), merge the integration branch into `develop`, run `git push origin develop`, then `gh pr create --base main --head develop` with a generated title/body. Never merge the PR yourself — the human merges `develop` → `main` on GitHub.
-9. **Closeout** — Call `supervisor_generate_receipt`, `supervisor_worktree(action: "cleanup")`
+8. **Finalize (human-gated git flow)** — Discover the project's development branch, preview deployment and main branch. Ask before merging the integration worktree into development and pushing it. After the push, verify the deployment for the pushed commit and present its preview URL for final user verification before opening the PR to main. If preview is absent, propose setup; if unavailable or failed, report that and do not claim verification passed. Never merge the PR yourself.
+9. **Closeout** — Before closing or cleaning up, explicitly decide whether this run produced durable, evidence-backed project learning. Record the decision and rationale in the run artifacts. If worthwhile, delegate to `memory-curator` with the run ID, relevant evidence paths and project memory location; wait for its result and report persisted changes or the exact blocker. Then generate the receipt and clean up only when safe.
 
 ## Rules
 
@@ -96,7 +96,7 @@ Then follow this pipeline:
 - Call `supervisor_verify` yourself — never trust agent self-reported results.
 - Critic receives diff + contract, not implementer's reasoning.
 - Max 3 repair rounds. Escalate to human, don't loop.
-- Git flow is strictly scoped: the only push is `git push origin develop`, and only after explicit human merge approval via `question`. Merge the integration branch into `develop` at the repo root first, push, then create the `develop` → `main` PR with `gh pr create --base main --head develop` and stop — the human merges the PR. Never push `main`, never force-push (permissions and the supervisor plugin hook enforce this). If a `develop` → `main` PR already exists, report its URL instead of creating a duplicate.
+- Git flow is human-gated: ask before merging and pushing the configured development branch; never force-push or push main. Verify the pushed commit's preview and obtain final user verification before creating a development-to-main PR. Reuse an existing PR instead of creating a duplicate. Existing permissions and guards remain authoritative; do not bypass a denial.
 - Use `supervisor_get_status` to check progress between stages.
 - Run artifacts go ONLY under `.opencode/runs/<run_id>/artifacts/` — never a repo-root `artifacts/`; scope agent writes to enforce it.
 - Verification profiles must include `bun run build` for any task touching module/import graphs — and on all waves before integration. Vitest-green is not sufficient (import-protection/handler-extraction regressions).

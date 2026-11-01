@@ -94,13 +94,14 @@ If blocking findings exist:
 Only after explicit human merge approval:
 1. At the repo root (checked out on `develop`), merge the integration branch into `develop`. Never merge into `main`.
 2. Push with exactly `git push origin develop` — the only permitted push. Force pushes and pushes to any other branch (including `main`) are denied by permissions and hard-blocked by the supervisor plugin hook.
-3. Create the release PR: `gh pr create --base main --head develop` with a generated title and body summarizing the run. If a `develop` → `main` PR already exists, report its URL instead of creating a duplicate. Never merge the PR — the human merges `develop` → `main` on GitHub.
-4. If the merge, push, or PR creation fails, stop and report — never retry with force.
+3. Find the preview deployment for the pushed commit, verify its status and provide the preview URL to the user for final verification. If no preview is configured, propose a setup; if it fails or cannot be verified, report the blocker rather than claiming success.
+4. Once the user verifies the preview, create the development-to-main PR. If one already exists, report its URL instead of creating a duplicate. Never merge the PR yourself.
+5. If merge, push, preview verification or PR creation fails, stop and report — never retry with force.
 
 ### Stage 8: Closeout
-1. Call `supervisor_generate_receipt`.
-2. Clean up worktrees via `supervisor_worktree` with `action: "cleanup"`.
-3. Propose memory updates for durable lessons.
+1. Before closing or cleaning up, decide whether the run produced durable, evidence-backed project learning. Record the decision and rationale in run artifacts, including when no update is worthwhile.
+2. If worthwhile, delegate to `memory-curator`, providing the run ID, relevant artifacts, project memory location, and a request to inspect existing memory and persist bounded evidence-linked updates. Wait for the result; report any failure or permission blocker explicitly rather than claiming enrichment.
+3. Call `supervisor_generate_receipt`, include the memory outcome, and clean up worktrees via `supervisor_worktree` only when safe.
 
 ## Key Rules
 

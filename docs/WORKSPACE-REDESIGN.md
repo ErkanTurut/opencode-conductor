@@ -2,15 +2,16 @@
 
 ## Authorization and isolation
 
-The user approved the full implementation scope in an isolated checkout on 2026-11-01.
-The installed plugin, existing user edits, active runs, ledgers, memory stores, service,
-and Desktop app must remain untouched. Do not activate the result or reload a plugin.
-Builds and tests run only in the unregistered redesign worktree with temporary fixtures.
-Live Desktop sign-off is deferred, not passed.
+The user approved the full implementation scope on 2026-11-01, including configuration writes,
+live inspection/reload, and publishing the reviewed result. The release was built and tested in
+an isolated worktree, then activated in the installed checkout at the same commit with existing
+user edits preserved. No production deployment or remote merge was performed. Manual Desktop
+click-through of the panel was not performed and is not claimed as passed.
 
-The panel remains a read-only projection under the repository's safety contract.
-Configuration provenance and drafts may be inspected; saving configuration, approving
-gates, retrying work, and merging are not panel actions. No new dependencies are authorized.
+The panel remains read-only for runs: it cannot approve, retry, pause, resume, launch, push, or
+merge. Agent and project settings are the only writes, through four revision-checked RPC methods
+with fixed server targets. Approving gates, retrying work, and merging are not panel actions.
+No new dependencies were added.
 
 ## Product contract
 
@@ -77,9 +78,8 @@ bun run build
 Use the fixture-only preview to check both themes, narrow/bottom-pane sizes, and large graphs.
 Run it with `bunx vite --config scripts/gui-preview.config.ts`; it mounts the real plugin entry,
 with synthetic host/RPC fixtures and no service reload.
-Provider credentials, real deployments, pushes, merges, and authenticated phone review are not
-exercised without separate authorization. No fixture result proves these integrations work.
-The detected branch policy/JSONC draft is inspectable, but there is no project-config editor,
-authenticated approval adapter, deployment webhook, phone endpoint, merge executor, or
-authenticated preview provider. New server writes are isolated code only until reviewed and
-deployed. The final report must list these limitations explicitly.
+Provider credentials, real deployments, pushes, merges, and phone review are not exercised by
+the fixture. No fixture result proves those external integrations work. The agent and project
+editors persist native Markdown and `.opencode/conductor.json`; there is no authenticated
+approval adapter, deployment webhook, merge executor, or authenticated preview provider. Preview
+awareness reads configuration only. The final report lists these limitations explicitly.

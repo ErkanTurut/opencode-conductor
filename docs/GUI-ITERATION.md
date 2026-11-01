@@ -39,5 +39,5 @@ preserve other keys. The UI does not write trust/permission authority or perform
 - Edit project settings and verify only intended settings changed.
 - Confirm no GUI action approves work, launches runs, pushes, creates PRs, or merges.
 
-Release checks and manual live Desktop verification are currently pending; do not report them
-as passed until evidence is collected.
+Release checks passed for v1.1.0. Manual Desktop click-through of every view was not performed;
+do not report visual sign-off until it is.

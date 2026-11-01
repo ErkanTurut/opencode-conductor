@@ -76,9 +76,13 @@ never loosen it. Preview configuration is awareness, not deployment evidence.
 
 ## Release evidence
 
-v1.1.0 validation, Desktop reload, live verification, and publication are pending. The version
-and install command document the intended release tag, not proof that it is published. See
-[CHANGELOG.md](CHANGELOG.md) for the pending-evidence notice.
+v1.1.0 was verified in the isolated worktree and then activated from
+`release/v1.1.0`: 959 tests pass, the baseline-gated server typecheck reports no new
+diagnostics, GUI typecheck/build/smoke and the full build pass. The live plugin reports
+`server`, `rpc`, and `gui` active; project reads were checked against real projects, and
+configuration saves, stale-revision refusal, effective host reload, and cleanup were checked
+with a temporary agent and project-settings probe. Manual Desktop click-through of the panel
+was not performed. See [CHANGELOG.md](CHANGELOG.md) for details.
 
 ## Development
 

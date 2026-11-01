@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.1.0 — pending release evidence
+## 1.1.0 — 2026-11-01
 
 ### Added
 
@@ -26,11 +26,20 @@
 - GUI writes are limited to the configuration RPCs above. They cannot loosen trust/host
   permissions, approve work, or perform remote actions.
 
-### Release evidence — pending
+### Release evidence
 
-- Tests, typechecks, builds, Desktop reload, and live verification have not been recorded.
-  This entry does not claim validation passed or that publication is complete.
-- Published tag/URL confirmation is pending.
+- `bun test`: 959 passed across 82 files; `bun run typecheck`: 41 existing diagnostics,
+  0 new against the recorded baseline; GUI typecheck, GUI build, GUI smoke, and full build
+  passed.
+- Activated the installed checkout at this commit (preserving existing user edits), restarted
+  the service, and confirmed the plugin reports `server`, `rpc`, and `gui` active. The served
+  GUI bundle contains the new configuration views.
+- Live project reads were checked against real projects. Live agent save, effective host
+  reload, project-settings save, preview awareness, and stale-revision refusal were checked
+  with temporary files in a trusted project, then removed.
+- Manual Desktop panel click-through, provider preview deployments, and remote PRs were not
+  exercised. Configuration saves are server-verified; visual Desktop sign-off remains a
+  separate check.
 
 ## 1.0.1 — 2026-10-30
 

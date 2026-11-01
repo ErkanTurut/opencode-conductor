@@ -31,6 +31,6 @@ run, or memory content needs to be deleted for this change.
 
 ## Publication
 
-The documented install target is `github:ErkanTurut/opencode-conductor#v1.1.0`; publication
-confirmation is pending. Check the repository release state before using the tag. v1.1.0
-verification and live Desktop sign-off are also pending.
+The documented install target is `github:ErkanTurut/opencode-conductor#v1.1.0`.
+v1.1.0 tests, builds, and live server configuration checks passed; manual Desktop click-through
+of the panel remains a separate check.

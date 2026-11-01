@@ -60,5 +60,6 @@ checked, immutable versioned project blocks with `proposed` status; no automatic
 
 ## Release evidence
 
-v1.1.0 tests, builds, typechecks, Desktop reload, live project verification and publication are
-pending. No successful evidence should be inferred from this architecture description.
+v1.1.0 tests, typechecks, builds, live plugin activation and configuration RPC checks passed
+on 2026-11-01. Manual Desktop click-through was not performed. Do not infer provider deployment
+or remote merge evidence from this architecture description.

@@ -52,6 +52,6 @@ immutable, versioned, proposed project memory and are not auto-promoted.
 
 ## Release and verification
 
-Validation and live host verification for v1.1.0 remain pending; do not interpret these method
-descriptions as proof of runtime release testing. For contract changes, test schema, guards,
-conflicts, and path confinement. See [ARCHITECTURE.md](ARCHITECTURE.md).
+v1.1.0 contract, guard, conflict, path-confinement, and live configuration RPC checks passed.
+Manual Desktop click-through was not performed. These descriptions are not proof that a
+provider deployment or remote merge occurred. See [ARCHITECTURE.md](ARCHITECTURE.md).

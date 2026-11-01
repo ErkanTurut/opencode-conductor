@@ -297,12 +297,21 @@ export async function registerConductorRpc(
     /revision conflict/.test(detail(error)) ? 'conflict' : 'invalid_configuration', detail(error),
   )
   async function editableAuthority(agentId: string, scope: 'project' | 'global'): Promise<ConfigurationAuthority> {
+    // The store's id guard is authoritative; check before passing an id to the host.
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(agentId)) throw new Error('Invalid agent ID')
     if (typeof ctx?.agent?.get !== 'function') return configurationAuthority
     // Resolve through OpenCode, not a competing JSONC hierarchy. Global edits
     // must never copy a project's prompt into the user's global definition.
     if (scope === 'global' && !options.globalDirectory) return configurationAuthority
-    const raw = await ctx.agent.get({ agentID: agentId }, scope === 'global'
-      ? { location: { directory: options.globalDirectory } } : undefined)
+    let raw: unknown
+    try {
+      raw = await ctx.agent.get({ agentID: agentId }, scope === 'global'
+        ? { location: { directory: options.globalDirectory } } : undefined)
+    } catch {
+      // An unknown agent has no effective native template; the packaged
+      // default (if any) is the next safe fallback.
+      return configurationAuthority
+    }
     const native = asRecord(asRecord(raw)?.data) ?? asRecord(raw)
     if (!native) return configurationAuthority
     const model = asRecord(native.model)

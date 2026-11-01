@@ -76,6 +76,16 @@ test('agent document rechecks revocable authority after native resolution', asyn
   expect(JSON.stringify(result)).not.toContain('Must not disclose')
 })
 
+test('an unknown host agent falls back to a createable target instead of failing', async () => {
+  const { call } = setup({ agentGet: async () => { throw new Error('Agent not found') } })
+  const document = await call('agentDocument', { scope: 'project', agentId: 'new-probe' })
+  expect(document.ok).toBe(true)
+  expect(document.data.fields.system).toBe('')
+  const saved = await call('saveAgentConfiguration', { scope: 'project', agentId: 'new-probe', expectedRevision: document.data.revision, fields: { system: 'Probe prompt', steps: 3 } })
+  expect(saved.ok).toBe(true)
+  expect(saved.data.fields.system).toBe('Probe prompt')
+})
+
 test('rejects invalid agent scope, id, field shapes and stale revision without overwriting', async () => {
   const { project, call } = setup()
   expect((await call('agentDocument', { agentId: '../coder', scope: 'project' })).ok).toBe(false)
